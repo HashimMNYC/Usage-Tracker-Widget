@@ -86,12 +86,11 @@ impl ClaudeSettingsManager {
         if state.claude_tracking.is_some() {
             return Err(ClaudeSetupError::SettingsConflict);
         }
-        require_unchanged(&self.settings_path, &original_bytes)?;
-        create_backup(&self.settings_path, &original_bytes, now)?;
-
         let status_line = status_line_for(&installed_exe)?;
         settings.insert("statusLine".into(), status_line.clone());
         let updated_bytes = serialize_settings(&settings)?;
+        require_unchanged(&self.settings_path, &original_bytes)?;
+        create_backup(&self.settings_path, &original_bytes, now)?;
         replace_if_unchanged(&self.settings_path, &original_bytes, &updated_bytes)?;
         let identity = Some(ClaudeTrackingIdentity {
             installed_exe,
@@ -279,8 +278,12 @@ fn status_line_for(exe: &Path) -> Result<Value, ClaudeSetupError> {
 }
 
 fn serialize_settings(settings: &Map<String, Value>) -> Result<Vec<u8>, ClaudeSetupError> {
-    serde_json::to_vec(&Value::Object(settings.clone()))
-        .map_err(|_| ClaudeSetupError::SettingsWriteFailed)
+    let bytes = serde_json::to_vec(&Value::Object(settings.clone()))
+        .map_err(|_| ClaudeSetupError::SettingsWriteFailed)?;
+    if bytes.len() > MAX_SETTINGS_BYTES {
+        return Err(ClaudeSetupError::SettingsWriteFailed);
+    }
+    Ok(bytes)
 }
 
 fn require_unchanged(path: &Path, expected: &[u8]) -> Result<(), ClaudeSetupError> {

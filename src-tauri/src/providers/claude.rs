@@ -125,17 +125,26 @@ fn parse_window(
 }
 
 fn parse_integer(value: &Value) -> Result<i64, CaptureError> {
-    value
-        .as_i64()
-        .or_else(|| value.as_u64().and_then(|raw| i64::try_from(raw).ok()))
-        .or_else(|| {
-            value.as_f64().and_then(|raw| {
-                (raw.is_finite()
-                    && raw.fract() == 0.0
-                    && raw >= i64::MIN as f64
-                    && raw <= i64::MAX as f64)
-                    .then_some(raw as i64)
-            })
-        })
-        .ok_or(CaptureError::Invalid)
+    const I64_UPPER_EXCLUSIVE_AS_F64: f64 = 9_223_372_036_854_775_808.0;
+
+    let number = value.as_number().ok_or(CaptureError::Invalid)?;
+    if let Some(raw) = number.as_i64() {
+        return Ok(raw);
+    }
+    if number.is_u64() {
+        return Err(CaptureError::Invalid);
+    }
+    let raw = number.as_f64().ok_or(CaptureError::Invalid)?;
+    if !raw.is_finite()
+        || raw.fract() != 0.0
+        || raw < i64::MIN as f64
+        || raw >= I64_UPPER_EXCLUSIVE_AS_F64
+    {
+        return Err(CaptureError::Invalid);
+    }
+    let integer = raw as i64;
+    if integer as f64 != raw {
+        return Err(CaptureError::Invalid);
+    }
+    Ok(integer)
 }

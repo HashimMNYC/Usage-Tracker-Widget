@@ -165,6 +165,40 @@ fn classifies_missing_expired_invalid_and_oversized_capture_input() {
 }
 
 #[test]
+fn reset_numbers_must_have_an_exact_in_range_i64_representation() {
+    let invalid_resets = [
+        json!(i64::MAX as u64 + 1),
+        json!(u64::MAX),
+        json!(9_223_372_036_854_775_808.0_f64),
+        json!(1.0e20_f64),
+        json!(NOW as f64 + 3_600.5),
+    ];
+    for reset in invalid_resets {
+        let mut input = exact_input();
+        input["rate_limits"]["five_hour"]["resets_at"] = reset;
+        assert_eq!(
+            parse_claude_statusline(input.to_string().as_bytes(), NOW),
+            Err(CaptureError::Invalid)
+        );
+    }
+
+    for (reset, expected) in [
+        (json!(i64::MAX), i64::MAX),
+        (json!((NOW + 3_600) as f64), NOW + 3_600),
+    ] {
+        let mut input = exact_input();
+        input["rate_limits"]["five_hour"]["resets_at"] = reset;
+        assert_eq!(
+            parse_claude_statusline(input.to_string().as_bytes(), NOW)
+                .unwrap()
+                .short_window
+                .resets_at,
+            expected
+        );
+    }
+}
+
+#[test]
 fn rejected_capture_never_replaces_an_existing_snapshot_or_echoes_input() {
     let mut initial = PersistedState::default();
     initial
@@ -302,6 +336,15 @@ fn owned_state(exe: &Path, status_line: Value) -> PersistedState {
     }
 }
 
+fn settings_at_exact_limit(mut value: Value) -> Vec<u8> {
+    value["padding"] = json!("");
+    let empty = serde_json::to_vec(&value).unwrap();
+    value["padding"] = json!("x".repeat(MAX_SETTINGS_BYTES - empty.len()));
+    let bytes = serde_json::to_vec(&value).unwrap();
+    assert_eq!(bytes.len(), MAX_SETTINGS_BYTES);
+    bytes
+}
+
 fn settings_manager(path: PathBuf, store: Arc<dyn StateStore>) -> ClaudeSettingsManager {
     ClaudeSettingsManager::new(path, store)
 }
@@ -427,6 +470,22 @@ fn enable_refuses_existing_non_null_status_line_without_any_byte_change() {
         Err(ClaudeSetupError::SettingsConflict)
     );
     assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn enable_rejects_an_update_over_the_settings_cap_before_backup_or_state_change() {
+    let original = settings_at_exact_limit(json!({}));
+    let (temp, path) = setup_settings(&original);
+    let store = Arc::new(TestStore::new(PersistedState::default()));
+    let manager = settings_manager(path.clone(), store.clone());
+
+    assert_eq!(
+        manager.enable(&temp.path().join("UsageWidget.exe"), NOW),
+        Err(ClaudeSetupError::SettingsWriteFailed)
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(store.snapshot().claude_tracking, None);
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
 }
 
 #[test]
@@ -564,6 +623,25 @@ fn repair_changes_only_the_full_widget_owned_object_and_updates_identity() {
     let identity = store.snapshot().claude_tracking.unwrap();
     assert_eq!(updated["statusLine"], identity.installed_status_line);
     assert_eq!(identity.installed_exe, new_exe);
+}
+
+#[test]
+fn repair_rejects_an_update_over_the_settings_cap_without_file_or_identity_change() {
+    let old_exe = PathBuf::from("C:\\A.exe");
+    let new_exe = PathBuf::from("C:\\Apps\\A-Much-Longer-Usage-Widget-Name.exe");
+    let owned = widget_status_line(&old_exe);
+    let original = settings_at_exact_limit(json!({"statusLine":owned}));
+    let (_temp, path) = setup_settings(&original);
+    let initial_state = owned_state(&old_exe, owned);
+    let store = Arc::new(TestStore::new(initial_state.clone()));
+    let manager = settings_manager(path.clone(), store.clone());
+
+    assert_eq!(
+        manager.repair(&new_exe, NOW),
+        Err(ClaudeSetupError::SettingsWriteFailed)
+    );
+    assert_eq!(fs::read(path).unwrap(), original);
+    assert_eq!(store.snapshot(), initial_state);
 }
 
 fn assert_state_failure_rolls_settings_back(operation: &str) {
