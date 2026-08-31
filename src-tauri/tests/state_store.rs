@@ -1,8 +1,11 @@
 use std::{
+    ffi::OsString,
     fs,
+    os::windows::ffi::OsStringExt,
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
+        mpsc::{self, Receiver, Sender},
         Arc, Condvar, Mutex,
     },
     thread,
@@ -14,9 +17,9 @@ use tempfile::TempDir;
 use usage_widget::{
     model::{ProviderId, ProviderSnapshot, WindowSnapshot},
     state_store::{
-        default_state_path, AtomicReplace, ClaudeTrackingIdentity, JsonStateStore, PersistedState,
-        StartupIdentity, StateError, StateMutation, StateStore, WindowPlacement,
-        STATE_SCHEMA_VERSION,
+        default_state_path, state_mutex_identity, AtomicReplace, ClaudeTrackingIdentity,
+        JsonStateStore, PersistedState, StartupIdentity, StateError, StateMutation, StateStore,
+        WindowPlacement, STATE_SCHEMA_VERSION,
     },
 };
 
@@ -207,6 +210,124 @@ fn concurrent_stores_preserve_updates_to_different_fields() {
     let state = JsonStateStore::new(path).load(NOW).unwrap();
     assert_eq!(state.window, Some(WindowPlacement { x: 120, y: -40 }));
     assert!(!state.always_on_top);
+}
+
+struct BlockingCopyReplace {
+    entered: Sender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
+impl AtomicReplace for BlockingCopyReplace {
+    fn replace(&self, temporary: &Path, destination: &Path) -> std::io::Result<()> {
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+        fs::copy(temporary, destination)?;
+        fs::remove_file(temporary)
+    }
+}
+
+struct CompletingCopyReplace {
+    completed: Sender<()>,
+}
+
+impl AtomicReplace for CompletingCopyReplace {
+    fn replace(&self, temporary: &Path, destination: &Path) -> std::io::Result<()> {
+        fs::copy(temporary, destination)?;
+        fs::remove_file(temporary)?;
+        self.completed.send(()).unwrap();
+        Ok(())
+    }
+}
+
+#[test]
+fn nonexistent_parent_transactions_share_one_stable_mutex() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("not-yet-created").join("state.json");
+    let test_user_scope = b"deterministic-test-user";
+    let identity_before_parent_creation = state_mutex_identity(&path, test_user_scope).unwrap();
+    let (first_entered_tx, first_entered_rx) = mpsc::channel();
+    let (release_first_tx, release_first_rx) = mpsc::channel();
+    let first_store = JsonStateStore::with_replacer(
+        path.clone(),
+        Arc::new(BlockingCopyReplace {
+            entered: first_entered_tx,
+            release: Mutex::new(release_first_rx),
+        }),
+    );
+    let first = thread::spawn(move || {
+        first_store
+            .apply(
+                NOW,
+                StateMutation::SetWindow(Some(WindowPlacement { x: 120, y: -40 })),
+            )
+            .unwrap();
+    });
+    first_entered_rx.recv().unwrap();
+
+    let identity_after_parent_creation = state_mutex_identity(&path, test_user_scope).unwrap();
+    let identities_match = identity_before_parent_creation == identity_after_parent_creation;
+    let (second_completed_tx, second_completed_rx) = mpsc::channel();
+    let second_store = JsonStateStore::with_replacer(
+        path.clone(),
+        Arc::new(CompletingCopyReplace {
+            completed: second_completed_tx,
+        }),
+    );
+    let (second_started_tx, second_started_rx) = mpsc::channel();
+    let second = thread::spawn(move || {
+        second_started_tx.send(()).unwrap();
+        second_store
+            .apply(NOW, StateMutation::SetAlwaysOnTop(false))
+            .unwrap();
+    });
+    second_started_rx.recv().unwrap();
+
+    if identities_match {
+        release_first_tx.send(()).unwrap();
+    } else {
+        second_completed_rx.recv().unwrap();
+        release_first_tx.send(()).unwrap();
+    }
+    first.join().unwrap();
+    second.join().unwrap();
+
+    let state = JsonStateStore::new(path).load(NOW).unwrap();
+    assert_eq!(state.window, Some(WindowPlacement { x: 120, y: -40 }));
+    assert!(
+        !state.always_on_top,
+        "a mutex identity split lost the second transaction"
+    );
+    assert_eq!(
+        identity_before_parent_creation, identity_after_parent_creation,
+        "mutex identity changed when its parent directory was created"
+    );
+}
+
+#[test]
+fn mutex_identity_includes_explicit_user_scope() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+
+    assert_ne!(
+        state_mutex_identity(&path, b"user-a").unwrap(),
+        state_mutex_identity(&path, b"user-b").unwrap()
+    );
+}
+
+#[test]
+fn mutex_identity_preserves_distinct_non_unicode_utf16_paths() {
+    let temp = TempDir::new().unwrap();
+    let first = temp
+        .path()
+        .join(OsString::from_wide(&[b'x' as u16, 0xd800]));
+    let second = temp
+        .path()
+        .join(OsString::from_wide(&[b'x' as u16, 0xd801]));
+
+    assert_ne!(
+        state_mutex_identity(&first, b"same-user").unwrap(),
+        state_mutex_identity(&second, b"same-user").unwrap()
+    );
 }
 
 #[test]

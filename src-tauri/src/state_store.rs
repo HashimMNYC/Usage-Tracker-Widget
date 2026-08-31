@@ -17,8 +17,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Globalization::{LCMapStringEx, LCMAP_LOWERCASE, LOCALE_NAME_INVARIANT},
+    Security::{GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, TOKEN_QUERY, TOKEN_USER},
     Storage::FileSystem::{MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH},
-    System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+    System::Threading::{
+        CreateMutexW, GetCurrentProcess, OpenProcessToken, ReleaseMutex, WaitForSingleObject,
+    },
 };
 
 use crate::model::{ProviderId, ProviderSnapshot};
@@ -307,11 +311,9 @@ struct StateMutexGuard {
 
 impl StateMutexGuard {
     fn acquire(path: &Path) -> Result<Self, StateError> {
-        let normalized = normalize_for_mutex(path)?;
-        let name = format!(
-            "Global\\UsageWidget-State-{:016x}",
-            deterministic_path_hash(&normalized)
-        );
+        let user_scope = current_user_scope()?;
+        let identity = state_mutex_identity(path, &user_scope)?;
+        let name = format!("Global\\UsageWidget-State-{identity:032x}");
         let wide_name = wide(OsStr::new(&name));
         let handle = unsafe { CreateMutexW(ptr::null(), 0, wide_name.as_ptr()) };
         if handle.is_null() {
@@ -343,19 +345,27 @@ impl Drop for StateMutexGuard {
     }
 }
 
-fn normalize_for_mutex(path: &Path) -> Result<String, StateError> {
+fn normalize_for_mutex(path: &Path) -> Result<Vec<u16>, StateError> {
     let absolute = std::path::absolute(path).map_err(|_| StateError::Io)?;
-    let normalized = match (absolute.parent(), absolute.file_name()) {
-        (Some(parent), Some(file_name)) => parent
-            .canonicalize()
-            .map(|parent| parent.join(file_name))
-            .unwrap_or(absolute),
-        _ => absolute,
-    };
-    Ok(normalized
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_lowercase())
+    let mut units = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
+    if units.contains(&0) {
+        return Err(StateError::Invalid);
+    }
+    normalize_verbatim_prefix(&mut units);
+    for unit in &mut units {
+        if *unit == u16::from(b'/') {
+            *unit = u16::from(b'\\');
+        }
+    }
+    invariant_lowercase(&units)
+}
+
+#[doc(hidden)]
+pub fn state_mutex_identity(path: &Path, user_scope: &[u8]) -> Result<u128, StateError> {
+    if user_scope.is_empty() {
+        return Err(StateError::Invalid);
+    }
+    normalize_for_mutex(path).map(|normalized| hash_mutex_identity(&normalized, user_scope))
 }
 
 fn wide(value: &OsStr) -> Vec<u16> {
@@ -366,10 +376,153 @@ fn wide_path(path: &Path) -> Vec<u16> {
     wide(path.as_os_str())
 }
 
-fn deterministic_path_hash(path: &str) -> u64 {
-    path.encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        })
+fn normalize_verbatim_prefix(path: &mut Vec<u16>) {
+    const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+    if starts_with_ascii_case_insensitive(path, VERBATIM_UNC) {
+        path.splice(..VERBATIM_UNC.len(), [b'\\' as u16, b'\\' as u16]);
+    } else if path.starts_with(VERBATIM) {
+        path.drain(..VERBATIM.len());
+    }
+}
+
+fn starts_with_ascii_case_insensitive(value: &[u16], prefix: &[u16]) -> bool {
+    value.len() >= prefix.len()
+        && value
+            .iter()
+            .zip(prefix)
+            .all(|(left, right)| ascii_lower(*left) == ascii_lower(*right))
+}
+
+fn ascii_lower(value: u16) -> u16 {
+    if (u16::from(b'A')..=u16::from(b'Z')).contains(&value) {
+        value + u16::from(b'a' - b'A')
+    } else {
+        value
+    }
+}
+
+fn invariant_lowercase(value: &[u16]) -> Result<Vec<u16>, StateError> {
+    let length = i32::try_from(value.len()).map_err(|_| StateError::Invalid)?;
+    let required = unsafe {
+        LCMapStringEx(
+            LOCALE_NAME_INVARIANT,
+            LCMAP_LOWERCASE,
+            value.as_ptr(),
+            length,
+            ptr::null_mut(),
+            0,
+            ptr::null(),
+            ptr::null(),
+            0,
+        )
+    };
+    if required == 0 {
+        return Err(StateError::Io);
+    }
+    let mut lowered = vec![0; required as usize];
+    let written = unsafe {
+        LCMapStringEx(
+            LOCALE_NAME_INVARIANT,
+            LCMAP_LOWERCASE,
+            value.as_ptr(),
+            length,
+            lowered.as_mut_ptr(),
+            required,
+            ptr::null(),
+            ptr::null(),
+            0,
+        )
+    };
+    if written != required {
+        return Err(StateError::Io);
+    }
+    Ok(lowered)
+}
+
+fn hash_mutex_identity(path: &[u16], user_scope: &[u8]) -> u128 {
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    let mut hash = OFFSET;
+    let mut update = |byte: u8| {
+        hash = (hash ^ u128::from(byte)).wrapping_mul(PRIME);
+    };
+    for byte in b"UsageWidget state mutex v2" {
+        update(*byte);
+    }
+    for byte in (user_scope.len() as u64).to_le_bytes() {
+        update(byte);
+    }
+    for byte in user_scope {
+        update(*byte);
+    }
+    for byte in (path.len() as u64).to_le_bytes() {
+        update(byte);
+    }
+    for unit in path {
+        for byte in unit.to_le_bytes() {
+            update(byte);
+        }
+    }
+    hash
+}
+
+fn current_user_scope() -> Result<Vec<u8>, StateError> {
+    let mut token = ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(StateError::Io);
+    }
+    let _token = TokenHandle(token);
+    let mut required = 0;
+    unsafe {
+        GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut required);
+    }
+    if required == 0 {
+        return Err(StateError::Io);
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let mut buffer = vec![0usize; (required as usize).div_ceil(word_size)];
+    let mut written = required;
+    if unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut written,
+        )
+    } == 0
+        || written > required
+    {
+        return Err(StateError::Io);
+    }
+    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let sid = token_user.User.Sid;
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err(StateError::Io);
+    }
+    let sid_length = unsafe { GetLengthSid(sid) } as usize;
+    if sid_length == 0 {
+        return Err(StateError::Io);
+    }
+    Ok(unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), sid_length) }.to_vec())
+}
+
+struct TokenHandle(HANDLE);
+
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
 }
