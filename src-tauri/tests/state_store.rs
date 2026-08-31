@@ -1,0 +1,320 @@
+use std::{
+    fs,
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
+    thread,
+    time::Duration,
+};
+
+use serde_json::json;
+use tempfile::TempDir;
+use usage_widget::{
+    model::{ProviderId, ProviderSnapshot, WindowSnapshot},
+    state_store::{
+        default_state_path, AtomicReplace, ClaudeTrackingIdentity, JsonStateStore, PersistedState,
+        StartupIdentity, StateError, StateMutation, StateStore, WindowPlacement,
+        STATE_SCHEMA_VERSION,
+    },
+};
+
+const NOW: i64 = 2_000_000_000;
+
+fn valid_snapshot() -> ProviderSnapshot {
+    ProviderSnapshot {
+        provider: ProviderId::Codex,
+        observed_at: NOW - 10,
+        short_window: WindowSnapshot {
+            duration_minutes: 300,
+            used_percent: 38.4,
+            resets_at: NOW + 3_600,
+        },
+        weekly_window: WindowSnapshot {
+            duration_minutes: 10_080,
+            used_percent: 62.0,
+            resets_at: NOW + 86_400,
+        },
+    }
+}
+
+#[test]
+fn persists_and_loads_a_valid_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let store = JsonStateStore::new(temp.path().join("state.json"));
+
+    store
+        .apply(NOW, StateMutation::UpsertSnapshot(valid_snapshot()))
+        .unwrap();
+
+    assert_eq!(
+        store.load(NOW).unwrap().snapshots[&ProviderId::Codex],
+        valid_snapshot()
+    );
+}
+
+#[test]
+fn rejects_an_invalid_candidate_without_replacing_current_state() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let store = JsonStateStore::new(path.clone());
+    store
+        .apply(NOW, StateMutation::UpsertSnapshot(valid_snapshot()))
+        .unwrap();
+    let original_bytes = fs::read(&path).unwrap();
+    let mut invalid = valid_snapshot();
+    invalid.short_window.used_percent = 100.1;
+
+    let result = store.apply(NOW, StateMutation::UpsertSnapshot(invalid));
+
+    assert!(matches!(result, Err(StateError::Invalid)));
+    assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    assert_eq!(
+        store.load(NOW).unwrap().snapshots[&ProviderId::Codex],
+        valid_snapshot()
+    );
+}
+
+#[test]
+fn current_projection_omits_an_expired_stored_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let store = JsonStateStore::new(temp.path().join("state.json"));
+    store
+        .apply(NOW, StateMutation::UpsertSnapshot(valid_snapshot()))
+        .unwrap();
+
+    let stored = store.load(NOW + 86_400).unwrap();
+
+    assert_eq!(stored.snapshots.len(), 1);
+    assert!(stored.current_snapshots(NOW + 86_400).is_empty());
+}
+
+#[test]
+fn malformed_json_is_quarantined_collision_resistently_and_defaults_are_loaded() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let store = JsonStateStore::new(path.clone());
+
+    for body in [b"{first-invalid".as_slice(), b"{second-invalid".as_slice()] {
+        fs::write(&path, body).unwrap();
+        assert_eq!(store.load(NOW).unwrap(), PersistedState::default());
+        assert!(!path.exists());
+    }
+
+    let mut quarantined = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    quarantined.sort();
+    assert_eq!(quarantined.len(), 2);
+    assert!(quarantined.iter().all(|path| {
+        let name = path.file_name().unwrap().to_string_lossy();
+        name.starts_with("state.corrupt.") && name.ends_with(".json")
+    }));
+    let bodies = quarantined
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(bodies.contains(&b"{first-invalid".to_vec()));
+    assert!(bodies.contains(&b"{second-invalid".to_vec()));
+}
+
+struct FailingReplace;
+
+impl AtomicReplace for FailingReplace {
+    fn replace(&self, _temporary: &Path, _destination: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected replacement failure"))
+    }
+}
+
+#[test]
+fn replacement_failure_leaves_original_bytes_unchanged() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    JsonStateStore::new(path.clone())
+        .apply(NOW, StateMutation::UpsertSnapshot(valid_snapshot()))
+        .unwrap();
+    let original_bytes = fs::read(&path).unwrap();
+    let failing = JsonStateStore::with_replacer(path.clone(), Arc::new(FailingReplace));
+
+    let result = failing.apply(NOW, StateMutation::SetAlwaysOnTop(false));
+
+    assert!(matches!(result, Err(StateError::Io)));
+    assert_eq!(fs::read(path).unwrap(), original_bytes);
+}
+
+struct CoordinatedCopyReplace {
+    entered: AtomicUsize,
+    gate: Mutex<()>,
+    wake: Condvar,
+}
+
+impl CoordinatedCopyReplace {
+    fn new() -> Self {
+        Self {
+            entered: AtomicUsize::new(0),
+            gate: Mutex::new(()),
+            wake: Condvar::new(),
+        }
+    }
+}
+
+impl AtomicReplace for CoordinatedCopyReplace {
+    fn replace(&self, temporary: &Path, destination: &Path) -> std::io::Result<()> {
+        let position = self.entered.fetch_add(1, Ordering::SeqCst);
+        if position == 0 {
+            let guard = self.gate.lock().unwrap();
+            let _ = self
+                .wake
+                .wait_timeout_while(guard, Duration::from_secs(1), |_| {
+                    self.entered.load(Ordering::SeqCst) < 2
+                })
+                .unwrap();
+        } else {
+            self.wake.notify_all();
+        }
+        fs::copy(temporary, destination)?;
+        fs::remove_file(temporary)
+    }
+}
+
+#[test]
+fn concurrent_stores_preserve_updates_to_different_fields() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let replacer = Arc::new(CoordinatedCopyReplace::new());
+    let store_one = JsonStateStore::with_replacer(path.clone(), replacer.clone());
+    let store_two = JsonStateStore::with_replacer(path.clone(), replacer);
+
+    let first = thread::spawn(move || {
+        store_one
+            .apply(
+                NOW,
+                StateMutation::SetWindow(Some(WindowPlacement { x: 120, y: -40 })),
+            )
+            .unwrap();
+    });
+    let second = thread::spawn(move || {
+        store_two
+            .apply(NOW, StateMutation::SetAlwaysOnTop(false))
+            .unwrap();
+    });
+    first.join().unwrap();
+    second.join().unwrap();
+
+    let state = JsonStateStore::new(path).load(NOW).unwrap();
+    assert_eq!(state.window, Some(WindowPlacement { x: 120, y: -40 }));
+    assert!(!state.always_on_top);
+}
+
+#[test]
+fn applies_and_clears_only_the_listed_preferences_and_identities() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let store = JsonStateStore::new(path.clone());
+    store
+        .apply(NOW, StateMutation::UpsertSnapshot(valid_snapshot()))
+        .unwrap();
+    store
+        .apply(
+            NOW,
+            StateMutation::SetStartup {
+                requested: true,
+                identity: Some(StartupIdentity {
+                    installed_exe: "C:\\Apps\\UsageWidget.exe".into(),
+                }),
+            },
+        )
+        .unwrap();
+    store
+        .apply(
+            NOW,
+            StateMutation::SetClaudeTracking(Some(ClaudeTrackingIdentity {
+                installed_exe: "C:\\Apps\\UsageWidget.exe".into(),
+                installed_status_line: json!({"type": "command", "command": "widget"}),
+            })),
+        )
+        .unwrap();
+
+    let state = store.load(NOW).unwrap();
+    assert!(state.launch_at_signin_requested);
+    assert!(state.startup_identity.is_some());
+    assert!(state.claude_tracking.is_some());
+    let serialized: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut keys = serialized
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "always_on_top",
+            "claude_tracking",
+            "launch_at_signin_requested",
+            "schema_version",
+            "snapshots",
+            "startup_identity",
+            "window",
+        ]
+    );
+
+    store
+        .apply(
+            NOW,
+            StateMutation::SetStartup {
+                requested: false,
+                identity: None,
+            },
+        )
+        .unwrap();
+    let cleared = store
+        .apply(NOW, StateMutation::SetClaudeTracking(None))
+        .unwrap();
+    assert!(!cleared.launch_at_signin_requested);
+    assert_eq!(cleared.startup_identity, None);
+    assert_eq!(cleared.claude_tracking, None);
+    assert_eq!(cleared.snapshots[&ProviderId::Codex], valid_snapshot());
+}
+
+#[test]
+fn defaults_match_schema_contract_and_unsupported_or_oversized_files_are_rejected() {
+    let defaults = PersistedState::default();
+    assert_eq!(defaults.schema_version, STATE_SCHEMA_VERSION);
+    assert!(defaults.snapshots.is_empty());
+    assert_eq!(defaults.window, None);
+    assert!(defaults.always_on_top);
+    assert!(!defaults.launch_at_signin_requested);
+    assert_eq!(defaults.startup_identity, None);
+    assert_eq!(defaults.claude_tracking, None);
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let mut unsupported = serde_json::to_value(PersistedState::default()).unwrap();
+    unsupported["schema_version"] = json!(STATE_SCHEMA_VERSION + 1);
+    fs::write(&path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
+    assert!(matches!(
+        JsonStateStore::new(path.clone()).load(NOW),
+        Err(StateError::UnsupportedSchema)
+    ));
+
+    fs::write(&path, vec![b' '; 1024 * 1024 + 1]).unwrap();
+    assert!(matches!(
+        JsonStateStore::new(path).load(NOW),
+        Err(StateError::Oversized)
+    ));
+}
+
+#[test]
+fn default_path_is_exactly_under_the_local_app_data_usage_widget_directory() {
+    let local_app_data = dirs::data_local_dir().unwrap();
+
+    assert_eq!(
+        default_state_path().unwrap(),
+        local_app_data.join("UsageWidget").join("state.json")
+    );
+}
