@@ -1,3 +1,4 @@
+pub mod claude_settings;
 pub mod diagnostics;
 pub mod model;
 pub mod paths;
