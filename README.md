@@ -40,6 +40,6 @@ See [docs/PRIVACY.md](docs/PRIVACY.md) for the exact stored fields and mutation 
 
 ## Moving the EXE
 
-Claude tracking and launch-at-sign-in store the absolute path of the EXE. If you move `usage-widget.exe`, use the corresponding **Repair** tray action before relying on that integration. Repair is explicit; the app does not silently rewrite an existing user-owned Claude status line or an ambiguous Windows startup entry.
+Claude tracking and launch-at-sign-in store the absolute path of the EXE. If you move `usage-widget.exe`, use the corresponding **Repair** tray action before relying on that integration. Claude repair refuses to rewrite a status line that no longer exactly matches the widget-owned object. Launch-at-sign-in repair uses the fixed per-user **Usage Widget** entry and the stored EXE path, rewrites that widget-named entry for the current EXE, and attempts to restore the exact prior registration snapshot if the operation fails.
 
 `usagewidget.py` is a legacy local prototype and an unshipped reference. It is not the release application.

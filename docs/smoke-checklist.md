@@ -51,7 +51,7 @@ This section may update app-owned state such as window position, but it must not
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-no-network.ps1 -RootPid <usage-widget-pid>
   ```
 
-  Exit 0 with no connection rows is the passing result. Exit 1 means at least one connecting or established entry was observed. Exit 2 means inspection failed; it is not a pass.
+  Exit 0 with no connection rows is the passing result only after the root and every recursively discovered descendant retain the same PID-plus-creation identity and every bounded CIM/TCP inspection completes throughout the 30-second window. Exit 1 means at least one connecting or established entry was observed during that stable complete sample. Exit 2 means the root was absent, a tracked process disappeared or its PID was reused, an inspection failed or timed out, or the complete sample could not be trusted; it is not a pass. The script must print only PID, state, and remote address rows for detected connections.
 - [ ] Use tray **Quit** and confirm the process exits and the tray icon disappears.
 
 ## C. Real opt-in system mutations: separate approval required
