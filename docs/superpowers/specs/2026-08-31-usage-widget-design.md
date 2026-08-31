@@ -96,6 +96,8 @@ The tray action **Enable Claude Tracking** performs these steps:
 4. Preserve every existing setting and add a status-line command pointing to the current absolute executable path with the `claude-capture` argument.
 5. Write the updated JSON through a temporary sibling file followed by an atomic replace.
 
+If the settings file is missing, oversized, malformed, or not a JSON object, setup fails without creating or changing it. This preserves the backup-before-write guarantee and keeps configuration fail-closed.
+
 When Claude invokes `usage-widget.exe claude-capture`, the process bypasses the GUI startup path, reads a size-bounded JSON object from standard input, allowlists only the five-hour and seven-day used percentages and reset timestamps, validates them, and atomically updates normalized state. It emits a concise one-line Claude status display containing the same remaining percentages so enabling the required status-line facility does not produce a blank status area. It writes no transcript, prompt, account, token, or raw input data.
 
 Disabling tracking removes the status-line entry only when it still exactly matches the command installed by the widget. If the user or Claude has changed that setting, the widget refuses to modify it and explains that manual review is required.
@@ -130,6 +132,8 @@ Writes use a temporary sibling and atomic replacement. Corrupt state is quaranti
 ## Interface
 
 The interface uses a near-black background, a system monospace stack headed by Cascadia Mono and Consolas, off-white text, a green Codex accent, and an orange Claude accent. It downloads no fonts or assets.
+
+Here, "ASCII interface" means the approved terminal-style presentation. The borders and meters intentionally use the Unicode box-drawing and block glyphs shown below rather than being restricted to the 7-bit ASCII character set.
 
 ```text
 ┌─ USAGE ──────────────── [x] ┐
