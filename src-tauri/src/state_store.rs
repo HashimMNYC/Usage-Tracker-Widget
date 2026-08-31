@@ -87,7 +87,13 @@ impl PersistedState {
         match mutation {
             StateMutation::UpsertSnapshot(snapshot) => {
                 snapshot.validate(now).map_err(|_| StateError::Invalid)?;
-                self.snapshots.insert(snapshot.provider, snapshot);
+                let is_older = self
+                    .snapshots
+                    .get(&snapshot.provider)
+                    .is_some_and(|stored| stored.observed_at > snapshot.observed_at);
+                if !is_older {
+                    self.snapshots.insert(snapshot.provider, snapshot);
+                }
             }
             StateMutation::SetWindow(window) => self.window = window,
             StateMutation::SetAlwaysOnTop(always_on_top) => {

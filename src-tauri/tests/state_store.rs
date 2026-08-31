@@ -58,6 +58,41 @@ fn persists_and_loads_a_valid_snapshot() {
 }
 
 #[test]
+fn a_delayed_older_writer_cannot_replace_a_newer_provider_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let mut older = valid_snapshot();
+    older.observed_at = NOW - 20;
+    older.short_window.used_percent = 20.0;
+    let mut newer = valid_snapshot();
+    newer.observed_at = NOW - 5;
+    newer.short_window.used_percent = 55.0;
+    let (newer_committed_tx, newer_committed_rx) = mpsc::channel();
+    let older_path = path.clone();
+    let older_writer = thread::spawn(move || {
+        newer_committed_rx.recv().unwrap();
+        JsonStateStore::new(older_path)
+            .apply(NOW, StateMutation::UpsertSnapshot(older))
+            .unwrap()
+    });
+
+    JsonStateStore::new(path.clone())
+        .apply(NOW, StateMutation::UpsertSnapshot(newer.clone()))
+        .unwrap();
+    newer_committed_tx.send(()).unwrap();
+    let returned_to_older_writer = older_writer.join().unwrap();
+
+    assert_eq!(
+        returned_to_older_writer.snapshots[&ProviderId::Codex],
+        newer
+    );
+    assert_eq!(
+        JsonStateStore::new(path).load(NOW).unwrap().snapshots[&ProviderId::Codex],
+        newer
+    );
+}
+
+#[test]
 fn rejects_an_invalid_candidate_without_replacing_current_state() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("state.json");

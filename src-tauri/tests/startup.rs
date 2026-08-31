@@ -4,11 +4,17 @@ use std::{
 };
 
 use usage_widget::{
+    claude_settings::ClaudeTrackingState,
     providers::claude::capture_mode_from_args,
-    shell::{clamp_position, height_for_layout, IntegrationStatus, Layout, WorkArea},
+    shell::{
+        clamp_position, claude_tray_action, claude_tray_label, height_for_layout,
+        startup_tray_action, startup_tray_action_state, IntegrationStatus, Layout, TrayActionState,
+        TrayIntegrationAction, WorkArea, ALWAYS_ON_TOP_LABEL, REFRESH_LABEL, SHOW_HIDE_LABEL,
+        STARTUP_MANUAL_REVIEW_MESSAGE,
+    },
     startup::{
         disable_startup, enable_startup, repair_startup, startup_status, StartupError,
-        StartupRegistration,
+        StartupRegistration, StartupRegistrationSnapshot,
     },
     state_store::{
         PersistedState, StartupIdentity, StateError, StateMutation, StateStore, WindowPlacement,
@@ -17,11 +23,83 @@ use usage_widget::{
 
 const NOW: i64 = 2_000_000_000;
 
+#[test]
+fn tray_labels_match_the_approved_text_exactly() {
+    assert_eq!(SHOW_HIDE_LABEL, "Show/Hide");
+    assert_eq!(REFRESH_LABEL, "Refresh");
+    assert_eq!(ALWAYS_ON_TOP_LABEL, "Always on Top");
+
+    assert_eq!(
+        startup_tray_action_state(IntegrationStatus::Disabled),
+        TrayActionState {
+            label: "Launch at Sign-in",
+            checked: false,
+        }
+    );
+    assert_eq!(
+        startup_tray_action_state(IntegrationStatus::Enabled),
+        TrayActionState {
+            label: "Launch at Sign-in",
+            checked: true,
+        }
+    );
+    assert_eq!(
+        startup_tray_action_state(IntegrationStatus::NeedsRepair),
+        TrayActionState {
+            label: "Repair Launch at Sign-in",
+            checked: false,
+        }
+    );
+    assert_eq!(
+        startup_tray_action_state(IntegrationStatus::Conflict),
+        TrayActionState {
+            label: "Launch at Sign-in",
+            checked: false,
+        }
+    );
+
+    assert_eq!(
+        claude_tray_label(ClaudeTrackingState::Disabled),
+        "Enable Claude Tracking"
+    );
+    assert_eq!(
+        claude_tray_label(ClaudeTrackingState::Enabled),
+        "Disable Claude Tracking"
+    );
+    assert_eq!(
+        claude_tray_label(ClaudeTrackingState::NeedsRepair),
+        "Repair Claude Tracking"
+    );
+    assert_eq!(
+        claude_tray_label(ClaudeTrackingState::Conflict),
+        "Repair Claude Tracking"
+    );
+    assert_eq!(
+        startup_tray_action(IntegrationStatus::NeedsRepair),
+        TrayIntegrationAction::Repair
+    );
+    assert_eq!(
+        startup_tray_action(IntegrationStatus::Conflict),
+        TrayIntegrationAction::ManualReview
+    );
+    assert_eq!(
+        claude_tray_action(ClaudeTrackingState::Conflict),
+        TrayIntegrationAction::ManualReview
+    );
+    assert_eq!(
+        STARTUP_MANUAL_REVIEW_MESSAGE,
+        "Launch at Sign-in needs manual review in Windows Startup Apps."
+    );
+}
+
 struct FakeRegistration {
     operations: Mutex<Vec<&'static str>>,
     enable_result: Mutex<Result<(), StartupError>>,
     disable_result: Mutex<Result<(), StartupError>>,
     enabled: Mutex<Result<bool, StartupError>>,
+    registered_value: Mutex<Option<PathBuf>>,
+    startup_approved_value: Mutex<Option<Vec<u8>>>,
+    enable_value: Option<PathBuf>,
 }
 
 impl Default for FakeRegistration {
@@ -31,19 +109,59 @@ impl Default for FakeRegistration {
             enable_result: Mutex::new(Ok(())),
             disable_result: Mutex::new(Ok(())),
             enabled: Mutex::new(Ok(false)),
+            registered_value: Mutex::new(None),
+            startup_approved_value: Mutex::new(None),
+            enable_value: None,
         }
     }
 }
 
 impl StartupRegistration for FakeRegistration {
+    fn snapshot(&self) -> Result<StartupRegistrationSnapshot, StartupError> {
+        self.operations.lock().unwrap().push("snapshot");
+        Ok(StartupRegistrationSnapshot {
+            run_value: self
+                .registered_value
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|path| path.to_string_lossy().as_bytes().to_vec()),
+            startup_approved_value: self.startup_approved_value.lock().unwrap().clone(),
+        })
+    }
+
+    fn restore(&self, snapshot: &StartupRegistrationSnapshot) -> Result<(), StartupError> {
+        self.operations.lock().unwrap().push("restore");
+        *self.registered_value.lock().unwrap() = snapshot
+            .run_value
+            .as_ref()
+            .map(|bytes| {
+                String::from_utf8(bytes.clone())
+                    .map(PathBuf::from)
+                    .map_err(|_| StartupError::OperationFailed)
+            })
+            .transpose()?;
+        *self.startup_approved_value.lock().unwrap() = snapshot.startup_approved_value.clone();
+        Ok(())
+    }
+
     fn enable(&self) -> Result<(), StartupError> {
         self.operations.lock().unwrap().push("enable");
-        *self.enable_result.lock().unwrap()
+        let result = *self.enable_result.lock().unwrap();
+        if result.is_ok() {
+            *self.registered_value.lock().unwrap() = self.enable_value.clone();
+            *self.startup_approved_value.lock().unwrap() = Some(vec![2, 0, 0, 0]);
+        }
+        result
     }
 
     fn disable(&self) -> Result<(), StartupError> {
         self.operations.lock().unwrap().push("disable");
-        *self.disable_result.lock().unwrap()
+        let result = *self.disable_result.lock().unwrap();
+        if result.is_ok() {
+            *self.registered_value.lock().unwrap() = None;
+        }
+        result
     }
 
     fn is_enabled(&self) -> Result<bool, StartupError> {
@@ -54,12 +172,14 @@ impl StartupRegistration for FakeRegistration {
 
 struct FakeStore {
     state: Mutex<PersistedState>,
+    fail_apply: Mutex<bool>,
 }
 
 impl FakeStore {
     fn new(state: PersistedState) -> Self {
         Self {
             state: Mutex::new(state),
+            fail_apply: Mutex::new(false),
         }
     }
 
@@ -74,10 +194,99 @@ impl StateStore for FakeStore {
     }
 
     fn apply(&self, now: i64, mutation: StateMutation) -> Result<PersistedState, StateError> {
+        if *self.fail_apply.lock().unwrap() {
+            return Err(StateError::Io);
+        }
         let mut state = self.state.lock().unwrap();
         state.apply_mutation(mutation, now)?;
         Ok(state.clone())
     }
+}
+
+#[test]
+fn enable_restores_the_absent_registration_when_state_persistence_fails() {
+    let current = PathBuf::from(r"C:\Current App\usage-widget.exe");
+    let store = FakeStore::new(PersistedState::default());
+    *store.fail_apply.lock().unwrap() = true;
+    let registration = FakeRegistration {
+        enable_value: Some(current.clone()),
+        ..FakeRegistration::default()
+    };
+
+    assert_eq!(
+        enable_startup(&registration, &store, &current, NOW),
+        Err(StartupError::OperationFailed)
+    );
+    assert_eq!(*registration.registered_value.lock().unwrap(), None);
+    assert_eq!(*registration.startup_approved_value.lock().unwrap(), None);
+    assert_eq!(store.snapshot(), PersistedState::default());
+    assert_eq!(
+        *registration.operations.lock().unwrap(),
+        vec!["snapshot", "enable", "restore"]
+    );
+}
+
+#[test]
+fn disable_restores_the_prior_registration_when_state_persistence_fails() {
+    let installed = PathBuf::from(r"C:\Installed App\usage-widget.exe");
+    let store = FakeStore::new(requested_state(&installed));
+    *store.fail_apply.lock().unwrap() = true;
+    let registration = FakeRegistration {
+        registered_value: Mutex::new(Some(installed.clone())),
+        startup_approved_value: Mutex::new(Some(vec![3, 9, 8, 7])),
+        ..FakeRegistration::default()
+    };
+
+    assert_eq!(
+        disable_startup(&registration, &store, NOW),
+        Err(StartupError::OperationFailed)
+    );
+    assert_eq!(
+        *registration.registered_value.lock().unwrap(),
+        Some(installed.clone())
+    );
+    assert_eq!(store.snapshot(), requested_state(&installed));
+    assert_eq!(
+        *registration.startup_approved_value.lock().unwrap(),
+        Some(vec![3, 9, 8, 7])
+    );
+    assert_eq!(
+        *registration.operations.lock().unwrap(),
+        vec!["snapshot", "disable", "restore"]
+    );
+}
+
+#[test]
+fn repair_restores_the_prior_path_when_state_persistence_fails() {
+    let installed = PathBuf::from(r"C:\Old App\usage-widget.exe");
+    let current = PathBuf::from(r"C:\Current App\usage-widget.exe");
+    let store = FakeStore::new(requested_state(&installed));
+    *store.fail_apply.lock().unwrap() = true;
+    let registration = FakeRegistration {
+        enabled: Mutex::new(Ok(true)),
+        registered_value: Mutex::new(Some(installed.clone())),
+        startup_approved_value: Mutex::new(Some(vec![3, 4, 5, 6])),
+        enable_value: Some(current.clone()),
+        ..FakeRegistration::default()
+    };
+
+    assert_eq!(
+        repair_startup(&registration, &store, &current, NOW),
+        Err(StartupError::OperationFailed)
+    );
+    assert_eq!(
+        *registration.registered_value.lock().unwrap(),
+        Some(installed.clone())
+    );
+    assert_eq!(store.snapshot(), requested_state(&installed));
+    assert_eq!(
+        *registration.startup_approved_value.lock().unwrap(),
+        Some(vec![3, 4, 5, 6])
+    );
+    assert_eq!(
+        *registration.operations.lock().unwrap(),
+        vec!["snapshot", "enable", "is_enabled", "restore"]
+    );
 }
 
 fn requested_state(installed_exe: &Path) -> PersistedState {
@@ -223,7 +432,7 @@ fn repair_enables_and_confirms_without_first_removing_the_previous_registration(
     );
     assert_eq!(
         *registration.operations.lock().unwrap(),
-        vec!["enable", "is_enabled"]
+        vec!["snapshot", "enable", "is_enabled"]
     );
     assert_eq!(
         store.snapshot().startup_identity,
@@ -251,6 +460,6 @@ fn repair_keeps_the_previous_identity_when_confirmation_fails() {
     assert_eq!(store.snapshot(), requested_state(&installed));
     assert_eq!(
         *registration.operations.lock().unwrap(),
-        vec!["enable", "is_enabled"]
+        vec!["snapshot", "enable", "is_enabled", "restore"]
     );
 }

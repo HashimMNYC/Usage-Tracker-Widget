@@ -12,6 +12,10 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
+use winreg::{
+    enums::{RegType, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_SZ},
+    RegKey, RegValue,
+};
 
 use crate::{
     claude_settings::{ClaudeSettingsManager, ClaudeTrackingState},
@@ -21,7 +25,7 @@ use crate::{
     providers::codex::CodexCollector,
     startup::{
         disable_startup, enable_startup, repair_startup, startup_status, StartupError,
-        StartupRegistration,
+        StartupRegistration, StartupRegistrationSnapshot,
     },
     state_store::{
         default_state_path, JsonStateStore, PersistedState, StateMutation, StateStore,
@@ -35,6 +39,17 @@ const WIDGET_WIDTH: f64 = 356.0;
 const TITLE_HEIGHT: i32 = 36;
 const POSITION_DEBOUNCE: Duration = Duration::from_millis(300);
 const TRAY_ERROR_MESSAGE: &str = "Usage Widget could not complete that tray action.";
+pub const STARTUP_MANUAL_REVIEW_MESSAGE: &str =
+    "Launch at Sign-in needs manual review in Windows Startup Apps.";
+const CLAUDE_MANUAL_REVIEW_MESSAGE: &str =
+    "Claude Tracking needs manual review in Claude settings.";
+pub const SHOW_HIDE_LABEL: &str = "Show/Hide";
+pub const REFRESH_LABEL: &str = "Refresh";
+pub const ALWAYS_ON_TOP_LABEL: &str = "Always on Top";
+const STARTUP_ENTRY_NAME: &str = "Usage Widget";
+const STARTUP_RUN_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
+const STARTUP_APPROVED_KEY: &str =
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 
 #[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +77,36 @@ pub struct WidgetView {
 pub struct CommandError {
     pub code: &'static str,
     pub message: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrayActionState {
+    pub label: &'static str,
+    pub checked: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayIntegrationAction {
+    Enable,
+    Disable,
+    Repair,
+    ManualReview,
+}
+
+enum TrayActionError {
+    General,
+    StartupManualReview,
+    ClaudeManualReview,
+}
+
+impl TrayActionError {
+    const fn message(&self) -> &'static str {
+        match self {
+            Self::General => TRAY_ERROR_MESSAGE,
+            Self::StartupManualReview => STARTUP_MANUAL_REVIEW_MESSAGE,
+            Self::ClaudeManualReview => CLAUDE_MANUAL_REVIEW_MESSAGE,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +163,22 @@ struct TauriStartupRegistration {
 }
 
 impl StartupRegistration for TauriStartupRegistration {
+    fn snapshot(&self) -> Result<StartupRegistrationSnapshot, StartupError> {
+        Ok(StartupRegistrationSnapshot {
+            run_value: read_startup_value(STARTUP_RUN_KEY, REG_SZ)?,
+            startup_approved_value: read_startup_value(STARTUP_APPROVED_KEY, REG_BINARY)?,
+        })
+    }
+
+    fn restore(&self, snapshot: &StartupRegistrationSnapshot) -> Result<(), StartupError> {
+        restore_startup_value(STARTUP_RUN_KEY, REG_SZ, snapshot.run_value.as_deref())?;
+        restore_startup_value(
+            STARTUP_APPROVED_KEY,
+            REG_BINARY,
+            snapshot.startup_approved_value.as_deref(),
+        )
+    }
+
     fn enable(&self) -> Result<(), StartupError> {
         self.app
             .autolaunch()
@@ -137,6 +198,52 @@ impl StartupRegistration for TauriStartupRegistration {
             .autolaunch()
             .is_enabled()
             .map_err(|_| StartupError::Unavailable)
+    }
+}
+
+fn read_startup_value(key: &str, expected_type: RegType) -> Result<Option<Vec<u8>>, StartupError> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let registry = match hkcu.open_subkey_with_flags(key, KEY_READ) {
+        Ok(registry) => registry,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(StartupError::Unavailable),
+    };
+    match registry.get_raw_value(STARTUP_ENTRY_NAME) {
+        Ok(value) if value.vtype == expected_type => Ok(Some(value.bytes)),
+        Ok(_) => Err(StartupError::Unavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(StartupError::Unavailable),
+    }
+}
+
+fn restore_startup_value(
+    key: &str,
+    value_type: RegType,
+    bytes: Option<&[u8]>,
+) -> Result<(), StartupError> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let registry = match hkcu.open_subkey_with_flags(key, KEY_SET_VALUE) {
+        Ok(registry) => registry,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && bytes.is_none() => {
+            return Ok(())
+        }
+        Err(_) => return Err(StartupError::OperationFailed),
+    };
+    match bytes {
+        Some(bytes) => registry
+            .set_raw_value(
+                STARTUP_ENTRY_NAME,
+                &RegValue {
+                    bytes: bytes.to_vec(),
+                    vtype: value_type,
+                },
+            )
+            .map_err(|_| StartupError::OperationFailed),
+        None => match registry.delete_value(STARTUP_ENTRY_NAME) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(StartupError::OperationFailed),
+        },
     }
 }
 
@@ -274,7 +381,11 @@ pub fn run_gui() -> Result<(), GuiStartError> {
             show_main_window(app);
             refresh_in_background(app);
         }))
-        .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name(STARTUP_ENTRY_NAME)
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_widget_view,
@@ -300,7 +411,7 @@ pub fn run_gui() -> Result<(), GuiStartError> {
             });
 
             if let Err(error) = build_tray(app.handle()) {
-                show_tray_error(app.handle());
+                show_tray_error(app.handle(), TRAY_ERROR_MESSAGE);
                 return Err(error.into());
             }
             configure_main_window(app.handle(), &persisted)?;
@@ -388,12 +499,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .map(|current| state.claude_settings.status(current, unix_now()))
         .unwrap_or(ClaudeTrackingState::Conflict);
 
-    let show_hide = MenuItem::with_id(app, "show_hide", "Show / Hide", true, None::<&str>)?;
-    let refresh_item = MenuItem::with_id(app, "refresh", "Refresh", true, None::<&str>)?;
+    let startup_action = startup_tray_action_state(startup_status);
+    let show_hide = MenuItem::with_id(app, "show_hide", SHOW_HIDE_LABEL, true, None::<&str>)?;
+    let refresh_item = MenuItem::with_id(app, "refresh", REFRESH_LABEL, true, None::<&str>)?;
     let always_on_top = CheckMenuItem::with_id(
         app,
         "always_on_top",
-        "Always on top",
+        ALWAYS_ON_TOP_LABEL,
         true,
         persisted.always_on_top,
         None::<&str>,
@@ -401,15 +513,15 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let launch_at_sign_in = CheckMenuItem::with_id(
         app,
         "launch_at_sign_in",
-        "Launch at sign in",
+        startup_action.label,
         true,
-        startup_status == IntegrationStatus::Enabled,
+        startup_action.checked,
         None::<&str>,
     )?;
     let claude_tracking = MenuItem::with_id(
         app,
         "claude_tracking",
-        claude_label(claude_status),
+        claude_tray_label(claude_status),
         true,
         None::<&str>,
     )?;
@@ -429,6 +541,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let topmost_handle = always_on_top.clone();
     let startup_handle = launch_at_sign_in.clone();
     let claude_handle = claude_tracking.clone();
+    let startup_click_handle = launch_at_sign_in.clone();
+    let claude_click_handle = claude_tracking.clone();
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .tooltip("Usage Widget")
@@ -448,11 +562,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 }
                 _ => Ok(()),
             };
-            if result.is_err() {
-                show_tray_error(app);
+            if let Err(error) = result {
+                show_tray_error(app, error.message());
             }
         })
-        .on_tray_icon_event(|tray, event| {
+        .on_tray_icon_event(move |tray, event| {
             if matches!(
                 event,
                 TrayIconEvent::Click {
@@ -461,6 +575,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     ..
                 }
             ) {
+                if let Err(error) = sync_integration_items(
+                    tray.app_handle(),
+                    &startup_click_handle,
+                    &claude_click_handle,
+                ) {
+                    show_tray_error(tray.app_handle(), error.message());
+                }
                 show_main_window(tray.app_handle());
             }
         });
@@ -471,10 +592,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn toggle_main_window(app: &AppHandle) -> Result<(), ()> {
-    let window = app.get_webview_window(MAIN_WINDOW).ok_or(())?;
-    if window.is_visible().map_err(|_| ())? {
-        window.hide().map_err(|_| ())
+fn toggle_main_window(app: &AppHandle) -> Result<(), TrayActionError> {
+    let window = app
+        .get_webview_window(MAIN_WINDOW)
+        .ok_or(TrayActionError::General)?;
+    if window.is_visible().map_err(|_| TrayActionError::General)? {
+        window.hide().map_err(|_| TrayActionError::General)
     } else {
         show_main_window(app);
         Ok(())
@@ -491,38 +614,67 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-fn toggle_topmost(app: &AppHandle, item: &CheckMenuItem<tauri::Wry>) -> Result<(), ()> {
-    let window = app.get_webview_window(MAIN_WINDOW).ok_or(())?;
-    let enabled = !window.is_always_on_top().map_err(|_| ())?;
-    window.set_always_on_top(enabled).map_err(|_| ())?;
+fn toggle_topmost(
+    app: &AppHandle,
+    item: &CheckMenuItem<tauri::Wry>,
+) -> Result<(), TrayActionError> {
+    let window = app
+        .get_webview_window(MAIN_WINDOW)
+        .ok_or(TrayActionError::General)?;
+    let enabled = !window
+        .is_always_on_top()
+        .map_err(|_| TrayActionError::General)?;
+    window
+        .set_always_on_top(enabled)
+        .map_err(|_| TrayActionError::General)?;
     app.state::<ShellState>()
         .store
         .apply(unix_now(), StateMutation::SetAlwaysOnTop(enabled))
-        .map_err(|_| ())?;
-    item.set_checked(enabled).map_err(|_| ())
+        .map_err(|_| TrayActionError::General)?;
+    item.set_checked(enabled)
+        .map_err(|_| TrayActionError::General)
 }
 
-fn toggle_startup(app: &AppHandle, item: &CheckMenuItem<tauri::Wry>) -> Result<(), ()> {
+fn toggle_startup(
+    app: &AppHandle,
+    item: &CheckMenuItem<tauri::Wry>,
+) -> Result<(), TrayActionError> {
     let state = app.state::<ShellState>();
     let now = unix_now();
-    let current = std::env::current_exe().map_err(|_| ())?;
-    let persisted = state.store.load(now).map_err(|_| ())?;
+    let current = std::env::current_exe().map_err(|_| TrayActionError::General)?;
+    let persisted = state
+        .store
+        .load(now)
+        .map_err(|_| TrayActionError::General)?;
     let status = startup_integration_status(&state, &current, &persisted);
-    let next = match status {
-        IntegrationStatus::Disabled => {
+    let result = match startup_tray_action(status) {
+        TrayIntegrationAction::Enable => {
             enable_startup(state.startup.as_ref(), state.store.as_ref(), &current, now)
         }
-        IntegrationStatus::Enabled => {
+        TrayIntegrationAction::Disable => {
             disable_startup(state.startup.as_ref(), state.store.as_ref(), now)
         }
-        IntegrationStatus::NeedsRepair => {
+        TrayIntegrationAction::Repair => {
             repair_startup(state.startup.as_ref(), state.store.as_ref(), &current, now)
         }
-        IntegrationStatus::Conflict => Err(StartupError::OperationFailed),
+        TrayIntegrationAction::ManualReview => {
+            sync_startup_item(item, status)?;
+            return Err(TrayActionError::StartupManualReview);
+        }
+    };
+    match result {
+        Ok(next) => sync_startup_item(item, next),
+        Err(_) => {
+            let after = state
+                .store
+                .load(now)
+                .ok()
+                .map(|persisted| startup_integration_status(&state, &current, &persisted))
+                .unwrap_or(IntegrationStatus::Conflict);
+            sync_startup_item(item, after)?;
+            Err(TrayActionError::General)
+        }
     }
-    .map_err(|_| ())?;
-    item.set_checked(next == IntegrationStatus::Enabled)
-        .map_err(|_| ())
 }
 
 fn startup_integration_status(
@@ -550,30 +702,111 @@ fn startup_integration_status(
         .unwrap_or(IntegrationStatus::NeedsRepair)
 }
 
-fn toggle_claude(app: &AppHandle, item: &MenuItem<tauri::Wry>) -> Result<(), ()> {
+fn toggle_claude(app: &AppHandle, item: &MenuItem<tauri::Wry>) -> Result<(), TrayActionError> {
     let state = app.state::<ShellState>();
     let now = unix_now();
-    let current = std::env::current_exe().map_err(|_| ())?;
+    let current = std::env::current_exe().map_err(|_| TrayActionError::General)?;
     let status = state.claude_settings.status(&current, now);
-    let next = match status {
-        ClaudeTrackingState::Disabled => state.claude_settings.enable(&current, now),
-        ClaudeTrackingState::Enabled => state.claude_settings.disable(now),
-        ClaudeTrackingState::NeedsRepair | ClaudeTrackingState::Conflict => {
-            state.claude_settings.repair(&current, now)
+    let result = match claude_tray_action(status) {
+        TrayIntegrationAction::Enable => state.claude_settings.enable(&current, now),
+        TrayIntegrationAction::Disable => state.claude_settings.disable(now),
+        TrayIntegrationAction::Repair => state.claude_settings.repair(&current, now),
+        TrayIntegrationAction::ManualReview => {
+            item.set_text(claude_tray_label(status))
+                .map_err(|_| TrayActionError::General)?;
+            return Err(TrayActionError::ClaudeManualReview);
+        }
+    };
+    match result {
+        Ok(next) => item
+            .set_text(claude_tray_label(next))
+            .map_err(|_| TrayActionError::General),
+        Err(_) => {
+            let after = state.claude_settings.status(&current, now);
+            item.set_text(claude_tray_label(after))
+                .map_err(|_| TrayActionError::General)?;
+            Err(TrayActionError::General)
         }
     }
-    .map_err(|_| ())?;
-    item.set_text(claude_label(next)).map_err(|_| ())
 }
 
-fn claude_label(status: ClaudeTrackingState) -> &'static str {
+pub fn startup_tray_action_state(status: IntegrationStatus) -> TrayActionState {
     match status {
-        ClaudeTrackingState::Disabled => "Enable Claude tracking",
-        ClaudeTrackingState::Enabled => "Disable Claude tracking",
+        IntegrationStatus::Disabled | IntegrationStatus::Conflict => TrayActionState {
+            label: "Launch at Sign-in",
+            checked: false,
+        },
+        IntegrationStatus::Enabled => TrayActionState {
+            label: "Launch at Sign-in",
+            checked: true,
+        },
+        IntegrationStatus::NeedsRepair => TrayActionState {
+            label: "Repair Launch at Sign-in",
+            checked: false,
+        },
+    }
+}
+
+pub fn startup_tray_action(status: IntegrationStatus) -> TrayIntegrationAction {
+    match status {
+        IntegrationStatus::Disabled => TrayIntegrationAction::Enable,
+        IntegrationStatus::Enabled => TrayIntegrationAction::Disable,
+        IntegrationStatus::NeedsRepair => TrayIntegrationAction::Repair,
+        IntegrationStatus::Conflict => TrayIntegrationAction::ManualReview,
+    }
+}
+
+pub fn claude_tray_action(status: ClaudeTrackingState) -> TrayIntegrationAction {
+    match status {
+        ClaudeTrackingState::Disabled => TrayIntegrationAction::Enable,
+        ClaudeTrackingState::Enabled => TrayIntegrationAction::Disable,
+        ClaudeTrackingState::NeedsRepair => TrayIntegrationAction::Repair,
+        ClaudeTrackingState::Conflict => TrayIntegrationAction::ManualReview,
+    }
+}
+
+pub fn claude_tray_label(status: ClaudeTrackingState) -> &'static str {
+    match status {
+        ClaudeTrackingState::Disabled => "Enable Claude Tracking",
+        ClaudeTrackingState::Enabled => "Disable Claude Tracking",
         ClaudeTrackingState::NeedsRepair | ClaudeTrackingState::Conflict => {
-            "Repair Claude tracking"
+            "Repair Claude Tracking"
         }
     }
+}
+
+fn sync_startup_item(
+    item: &CheckMenuItem<tauri::Wry>,
+    status: IntegrationStatus,
+) -> Result<(), TrayActionError> {
+    let action = startup_tray_action_state(status);
+    item.set_text(action.label)
+        .map_err(|_| TrayActionError::General)?;
+    item.set_checked(action.checked)
+        .map_err(|_| TrayActionError::General)
+}
+
+fn sync_integration_items(
+    app: &AppHandle,
+    startup_item: &CheckMenuItem<tauri::Wry>,
+    claude_item: &MenuItem<tauri::Wry>,
+) -> Result<(), TrayActionError> {
+    let state = app.state::<ShellState>();
+    let now = unix_now();
+    let current = std::env::current_exe().map_err(|_| TrayActionError::General)?;
+    let persisted = state
+        .store
+        .load(now)
+        .map_err(|_| TrayActionError::General)?;
+    sync_startup_item(
+        startup_item,
+        startup_integration_status(&state, &current, &persisted),
+    )?;
+    claude_item
+        .set_text(claude_tray_label(
+            state.claude_settings.status(&current, now),
+        ))
+        .map_err(|_| TrayActionError::General)
 }
 
 fn refresh_in_background(app: &AppHandle) {
@@ -613,9 +846,9 @@ fn save_current_state(app: &AppHandle, state: &ShellState) {
     }
 }
 
-fn show_tray_error(app: &AppHandle) {
+fn show_tray_error(app: &AppHandle, message: &'static str) {
     app.dialog()
-        .message(TRAY_ERROR_MESSAGE)
+        .message(message)
         .title("Usage Widget")
         .kind(MessageDialogKind::Error)
         .show(|_| {});

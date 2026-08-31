@@ -31,8 +31,14 @@ version = "2.7.3"
 [dependencies.tauri-plugin-single-instance]
 version = "2.4.4"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "=0.10.1"
+
 [build-dependencies]
 tauri-build = "2.6.3"
+
+[patch.crates-io]
+auto-launch = { path = "vendor/auto-launch" }
 
 [profile.release]
 codegen-units = 1
