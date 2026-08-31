@@ -1,0 +1,145 @@
+:root {
+  --background: #101411;
+  --panel: #161d18;
+  --text: #edf3e9;
+  --muted: #aab4a8;
+  --border: #7e8a80;
+  --codex: #69d383;
+  --claude: #f19b58;
+  --amber: #f2c14e;
+  --red: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-width: 356px;
+  background: var(--background);
+  color: var(--text);
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+body {
+  border: 1px solid var(--border);
+}
+
+.title-row {
+  display: flex;
+  align-items: stretch;
+  min-height: 36px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.drag-region {
+  flex: 1;
+  padding: 9px 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  user-select: none;
+}
+
+button {
+  min-width: 42px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  padding: 0 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #2a342d;
+}
+
+button:focus-visible {
+  outline: 3px solid var(--text);
+  outline-offset: -3px;
+}
+
+#providers {
+  padding: 10px;
+}
+
+.provider-card {
+  border: 1px solid var(--border);
+  padding: 10px;
+}
+
+.provider-card + .provider-card {
+  margin-top: 10px;
+}
+
+.provider-heading {
+  margin: 0 0 8px;
+  font-size: 14px;
+  letter-spacing: 0.08em;
+}
+
+.provider--codex .provider-heading,
+.meter--codex {
+  color: var(--codex);
+}
+
+.provider--claude .provider-heading,
+.meter--claude {
+  color: var(--claude);
+}
+
+.window-row {
+  display: grid;
+  grid-template-columns: 3ch 1fr auto;
+  gap: 4px 8px;
+  align-items: baseline;
+  margin-top: 6px;
+}
+
+.window-label,
+.window-percent,
+.reset {
+  white-space: nowrap;
+}
+
+.meter {
+  min-width: 0;
+}
+
+.meter--amber {
+  color: var(--amber);
+}
+
+.meter--red {
+  color: var(--red);
+}
+
+.reset {
+  grid-column: 2 / -1;
+  color: var(--muted);
+}
+
+.empty-state {
+  padding: 22px 8px;
+  text-align: center;
+  color: var(--muted);
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --background: #000;
+    --panel: #000;
+    --text: #fff;
+    --muted: #fff;
+    --border: #fff;
+    --codex: #7dff9d;
+    --claude: #ffb273;
+    --amber: #ffe36a;
+    --red: #ff8989;
+  }
+}
