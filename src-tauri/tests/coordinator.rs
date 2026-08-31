@@ -16,9 +16,10 @@ use usage_widget::{
         start_supervisor, CollectionCoordinator, RefreshAction, RefreshScheduler, DEBOUNCE,
         FALLBACK_RESCAN,
     },
+    diagnostics::DiagnosticCode,
     model::{ProviderId, ProviderSnapshot, WindowSnapshot},
     providers::codex::CodexCollector,
-    state_store::{PersistedState, StateError, StateMutation, StateStore},
+    state_store::{JsonStateStore, PersistedState, StateError, StateMutation, StateStore},
 };
 
 const NOW: i64 = 2_000_000_000;
@@ -251,6 +252,26 @@ fn every_projection_hides_snapshots_as_soon_as_they_expire() {
 }
 
 #[test]
+fn projection_reconciles_a_cross_process_claude_write_without_a_codex_candidate() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let coordinator = CollectionCoordinator::load(
+        Arc::new(CodexCollector::new(Vec::new())),
+        Arc::new(JsonStateStore::new(path.clone())),
+        NOW,
+    )
+    .unwrap();
+    let mut claude = snapshot(NOW - 10, NOW + 3_600, NOW + 86_400);
+    claude.provider = ProviderId::Claude;
+
+    JsonStateStore::new(path)
+        .apply(NOW, StateMutation::UpsertSnapshot(claude.clone()))
+        .unwrap();
+
+    assert_eq!(coordinator.current_snapshots(NOW), vec![claude]);
+}
+
+#[test]
 fn supervisor_stop_is_idempotent_and_joins_the_worker() {
     let temp = TempDir::new().unwrap();
     let sessions = temp.path().join("sessions");
@@ -268,5 +289,27 @@ fn supervisor_stop_is_idempotent_and_joins_the_worker() {
 
     let mut supervisor = start_supervisor(coordinator).unwrap();
     supervisor.stop_and_join();
+    supervisor.stop_and_join();
+}
+
+#[test]
+fn unusable_watch_root_records_only_a_safe_diagnostic_code() {
+    let temp = TempDir::new().unwrap();
+    let unusable = temp.path().join("sessions");
+    fs::write(&unusable, b"not a directory").unwrap();
+    let coordinator = Arc::new(
+        CollectionCoordinator::load(
+            Arc::new(CodexCollector::new(vec![unusable])),
+            Arc::new(MemoryStore::default()),
+            NOW,
+        )
+        .unwrap(),
+    );
+
+    let mut supervisor = start_supervisor(coordinator.clone()).unwrap();
+
+    assert!(coordinator
+        .diagnostics()
+        .contains(&DiagnosticCode::WatcherUnavailable));
     supervisor.stop_and_join();
 }
