@@ -1,0 +1,25 @@
+[package]
+name = "usage-widget"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "usage_widget"
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+dirs = "6.0.0"
+notify = "8.2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3.27.0"
+thiserror = "2"
+walkdir = "2.5.0"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "s"
+strip = "symbols"
