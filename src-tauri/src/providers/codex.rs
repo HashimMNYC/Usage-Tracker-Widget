@@ -39,6 +39,10 @@ const DURATION_KEYS: &[&str] = &[
     "window_duration_minutes",
 ];
 const RESET_KEYS: &[&str] = &["resets_at", "resetsAt", "reset_at", "resetAt"];
+const MIN_CREDIBLE_EPOCH_SECONDS: i64 = 1_000_000_000;
+const MAX_CREDIBLE_EPOCH_SECONDS: i64 = 9_999_999_999;
+const MIN_CREDIBLE_EPOCH_MILLISECONDS: i64 = MIN_CREDIBLE_EPOCH_SECONDS * 1_000;
+const MAX_CREDIBLE_EPOCH_MILLISECONDS: i64 = MAX_CREDIBLE_EPOCH_SECONDS * 1_000 + 999;
 
 #[derive(Clone, Debug)]
 pub struct ReverseReadResult {
@@ -75,6 +79,17 @@ pub fn read_jsonl_reverse(path: &Path) -> ReverseReadResult {
         return result;
     };
     let start = file_len.saturating_sub(MAX_JSONL_TAIL_BYTES);
+    let starts_on_line_boundary = if start == 0 {
+        true
+    } else {
+        let mut previous = [0_u8; 1];
+        if file.seek(SeekFrom::Start(start - 1)).is_err() || file.read_exact(&mut previous).is_err()
+        {
+            result.diagnostics.push(DiagnosticCode::SourceUnreadable);
+            return result;
+        }
+        previous[0] == b'\n'
+    };
     if file.seek(SeekFrom::Start(start)).is_err() {
         result.diagnostics.push(DiagnosticCode::SourceUnreadable);
         return result;
@@ -90,7 +105,7 @@ pub fn read_jsonl_reverse(path: &Path) -> ReverseReadResult {
         return result;
     }
 
-    if start > 0 {
+    if !starts_on_line_boundary {
         let Some(first_newline) = bytes.iter().position(|byte| *byte == b'\n') else {
             return result;
         };
@@ -149,10 +164,10 @@ pub fn extract_codex_snapshot(
         return Err(ExtractError::MissingWindow);
     }
 
-    let observed_at = record
-        .get("timestamp")
-        .and_then(normalize_timestamp)
-        .unwrap_or(observed_at_fallback);
+    let observed_at = match record.get("timestamp") {
+        Some(value) => normalize_timestamp(value).ok_or(ExtractError::InvalidField)?,
+        None => observed_at_fallback,
+    };
     let snapshot = ProviderSnapshot {
         provider: ProviderId::Codex,
         observed_at,
@@ -314,10 +329,12 @@ fn normalize_timestamp(value: &Value) -> Option<i64> {
 }
 
 fn normalize_epoch(value: i64) -> Option<i64> {
-    if value.unsigned_abs() >= 1_000_000_000_000 {
+    if (MIN_CREDIBLE_EPOCH_SECONDS..=MAX_CREDIBLE_EPOCH_SECONDS).contains(&value) {
+        Some(value)
+    } else if (MIN_CREDIBLE_EPOCH_MILLISECONDS..=MAX_CREDIBLE_EPOCH_MILLISECONDS).contains(&value) {
         Some(value / 1_000)
     } else {
-        Some(value)
+        None
     }
 }
 

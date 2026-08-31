@@ -15,7 +15,7 @@ use usage_widget::{
     paths::{discover_candidate_files, resolve_codex_roots},
     providers::codex::{
         extract_codex_snapshot, read_jsonl_reverse, CodexCollector, ExtractError,
-        MAX_CANDIDATE_FILES, MAX_JSONL_RECORD_BYTES,
+        MAX_CANDIDATE_FILES, MAX_JSONL_RECORD_BYTES, MAX_JSONL_TAIL_BYTES,
     },
 };
 
@@ -156,6 +156,23 @@ fn ignores_invalid_partial_final_line_and_returns_preceding_complete_record() {
 }
 
 #[test]
+fn preserves_complete_record_aligned_at_bounded_tail_start() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("aligned.jsonl");
+    let aligned = format!("{}\n", complete_record(NOW - 10));
+    let padding_len = MAX_JSONL_TAIL_BYTES as usize - aligned.len();
+    let mut body = b"{}\n".to_vec();
+    body.extend_from_slice(aligned.as_bytes());
+    body.extend(std::iter::repeat_n(b'x', padding_len));
+    fs::write(&path, body).unwrap();
+
+    let result = read_jsonl_reverse(&path);
+
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].get("timestamp"), Some(&json!(NOW - 10)));
+}
+
+#[test]
 fn normalizes_epoch_milliseconds_and_rfc3339_reset_timestamps() {
     let record = json!({
         "timestamp": NOW - 10,
@@ -179,6 +196,43 @@ fn normalizes_epoch_milliseconds_and_rfc3339_reset_timestamps() {
 
     assert_eq!(snapshot.short_window.resets_at, NOW + 3_600);
     assert_eq!(snapshot.weekly_window.resets_at, NOW + 86_400);
+}
+
+#[test]
+fn rejects_unsupported_microsecond_and_nanosecond_reset_magnitudes() {
+    for resets_at in [(NOW + 3_600) * 1_000_000, (NOW + 3_600) * 1_000_000_000] {
+        let mut record = complete_record(NOW - 10);
+        record["payload"]["rate_limits"]["primary"]["resets_at"] = json!(resets_at);
+
+        assert_eq!(
+            extract_codex_snapshot(&record, NOW - 20, NOW),
+            Err(ExtractError::InvalidField)
+        );
+    }
+}
+
+#[test]
+fn unsupported_observation_magnitudes_cannot_win_newest_valid_selection() {
+    let unsupported = [(NOW - 1) * 1_000_000, (NOW - 1) * 1_000_000_000];
+    let mut records = vec![complete_record(NOW - 10)];
+    for timestamp in unsupported {
+        let mut record = complete_record(NOW - 20);
+        record["timestamp"] = json!(timestamp);
+        assert_eq!(
+            extract_codex_snapshot(&record, NOW - 30, NOW),
+            Err(ExtractError::InvalidField)
+        );
+        records.push(record);
+    }
+
+    let temp = TempDir::new().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    write_jsonl(&sessions.join("rollout.jsonl"), &records);
+
+    let result = CodexCollector::new(vec![sessions]).initial_scan(NOW);
+
+    assert_eq!(result.snapshot.unwrap().observed_at, NOW - 10);
 }
 
 #[test]
