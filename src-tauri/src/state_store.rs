@@ -87,11 +87,11 @@ impl PersistedState {
         match mutation {
             StateMutation::UpsertSnapshot(snapshot) => {
                 snapshot.validate(now).map_err(|_| StateError::Invalid)?;
-                let is_older = self
+                let is_stale_or_ambiguous = self
                     .snapshots
                     .get(&snapshot.provider)
-                    .is_some_and(|stored| stored.observed_at > snapshot.observed_at);
-                if !is_older {
+                    .is_some_and(|stored| stored.observed_at >= snapshot.observed_at);
+                if !is_stale_or_ambiguous {
                     self.snapshots.insert(snapshot.provider, snapshot);
                 }
             }

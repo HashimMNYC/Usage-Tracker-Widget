@@ -100,6 +100,8 @@ struct FakeRegistration {
     registered_value: Mutex<Option<PathBuf>>,
     startup_approved_value: Mutex<Option<Vec<u8>>>,
     enable_value: Option<PathBuf>,
+    enable_mutates_before_error: bool,
+    disable_mutates_before_error: bool,
 }
 
 impl Default for FakeRegistration {
@@ -112,6 +114,8 @@ impl Default for FakeRegistration {
             registered_value: Mutex::new(None),
             startup_approved_value: Mutex::new(None),
             enable_value: None,
+            enable_mutates_before_error: false,
+            disable_mutates_before_error: false,
         }
     }
 }
@@ -148,7 +152,7 @@ impl StartupRegistration for FakeRegistration {
     fn enable(&self) -> Result<(), StartupError> {
         self.operations.lock().unwrap().push("enable");
         let result = *self.enable_result.lock().unwrap();
-        if result.is_ok() {
+        if result.is_ok() || self.enable_mutates_before_error {
             *self.registered_value.lock().unwrap() = self.enable_value.clone();
             *self.startup_approved_value.lock().unwrap() = Some(vec![2, 0, 0, 0]);
         }
@@ -158,7 +162,7 @@ impl StartupRegistration for FakeRegistration {
     fn disable(&self) -> Result<(), StartupError> {
         self.operations.lock().unwrap().push("disable");
         let result = *self.disable_result.lock().unwrap();
-        if result.is_ok() {
+        if result.is_ok() || self.disable_mutates_before_error {
             *self.registered_value.lock().unwrap() = None;
         }
         result
@@ -168,6 +172,94 @@ impl StartupRegistration for FakeRegistration {
         self.operations.lock().unwrap().push("is_enabled");
         *self.enabled.lock().unwrap()
     }
+}
+
+#[test]
+fn enable_restores_a_partial_registration_when_the_plugin_returns_an_error() {
+    let current = PathBuf::from(r"C:\Current App\usage-widget.exe");
+    let store = FakeStore::new(PersistedState::default());
+    let registration = FakeRegistration {
+        enable_result: Mutex::new(Err(StartupError::OperationFailed)),
+        enable_value: Some(current.clone()),
+        enable_mutates_before_error: true,
+        ..FakeRegistration::default()
+    };
+
+    assert_eq!(
+        enable_startup(&registration, &store, &current, NOW),
+        Err(StartupError::OperationFailed)
+    );
+    assert_eq!(*registration.registered_value.lock().unwrap(), None);
+    assert_eq!(*registration.startup_approved_value.lock().unwrap(), None);
+    assert_eq!(store.snapshot(), PersistedState::default());
+    assert_eq!(
+        *registration.operations.lock().unwrap(),
+        vec!["snapshot", "enable", "restore"]
+    );
+}
+
+#[test]
+fn disable_restores_a_partial_registration_when_the_plugin_returns_an_error() {
+    let installed = PathBuf::from(r"C:\Installed App\usage-widget.exe");
+    let store = FakeStore::new(requested_state(&installed));
+    let registration = FakeRegistration {
+        disable_result: Mutex::new(Err(StartupError::OperationFailed)),
+        registered_value: Mutex::new(Some(installed.clone())),
+        startup_approved_value: Mutex::new(Some(vec![3, 9, 8, 7])),
+        disable_mutates_before_error: true,
+        ..FakeRegistration::default()
+    };
+
+    assert_eq!(
+        disable_startup(&registration, &store, NOW),
+        Err(StartupError::OperationFailed)
+    );
+    assert_eq!(
+        *registration.registered_value.lock().unwrap(),
+        Some(installed.clone())
+    );
+    assert_eq!(
+        *registration.startup_approved_value.lock().unwrap(),
+        Some(vec![3, 9, 8, 7])
+    );
+    assert_eq!(store.snapshot(), requested_state(&installed));
+    assert_eq!(
+        *registration.operations.lock().unwrap(),
+        vec!["snapshot", "disable", "restore"]
+    );
+}
+
+#[test]
+fn repair_restores_a_partial_registration_when_enable_returns_an_error() {
+    let installed = PathBuf::from(r"C:\Old App\usage-widget.exe");
+    let current = PathBuf::from(r"C:\Current App\usage-widget.exe");
+    let store = FakeStore::new(requested_state(&installed));
+    let registration = FakeRegistration {
+        enable_result: Mutex::new(Err(StartupError::OperationFailed)),
+        registered_value: Mutex::new(Some(installed.clone())),
+        startup_approved_value: Mutex::new(Some(vec![3, 4, 5, 6])),
+        enable_value: Some(current.clone()),
+        enable_mutates_before_error: true,
+        ..FakeRegistration::default()
+    };
+
+    assert_eq!(
+        repair_startup(&registration, &store, &current, NOW),
+        Err(StartupError::OperationFailed)
+    );
+    assert_eq!(
+        *registration.registered_value.lock().unwrap(),
+        Some(installed.clone())
+    );
+    assert_eq!(
+        *registration.startup_approved_value.lock().unwrap(),
+        Some(vec![3, 4, 5, 6])
+    );
+    assert_eq!(store.snapshot(), requested_state(&installed));
+    assert_eq!(
+        *registration.operations.lock().unwrap(),
+        vec!["snapshot", "enable", "restore"]
+    );
 }
 
 struct FakeStore {

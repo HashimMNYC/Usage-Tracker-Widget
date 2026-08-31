@@ -27,6 +27,9 @@ keywords = [
 license = "MIT"
 repository = "https://github.com/zzzgydi/auto-launch.git"
 
+[lib]
+doctest = false
+
 [dependencies.thiserror]
 version = "1"
 

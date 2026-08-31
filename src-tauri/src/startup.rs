@@ -44,10 +44,11 @@ pub fn enable_startup(
     now: i64,
 ) -> Result<IntegrationStatus, StartupError> {
     let previous = registration.snapshot()?;
-    registration.enable()?;
+    if registration.enable().is_err() {
+        return fail_after_restore(registration, &previous);
+    }
     if persist_startup(store, true, Some(current), now).is_err() {
-        registration.restore(&previous)?;
-        return Err(StartupError::OperationFailed);
+        return fail_after_restore(registration, &previous);
     }
     Ok(IntegrationStatus::Enabled)
 }
@@ -58,10 +59,11 @@ pub fn disable_startup(
     now: i64,
 ) -> Result<IntegrationStatus, StartupError> {
     let previous = registration.snapshot()?;
-    registration.disable()?;
+    if registration.disable().is_err() {
+        return fail_after_restore(registration, &previous);
+    }
     if persist_startup(store, false, None, now).is_err() {
-        registration.restore(&previous)?;
-        return Err(StartupError::OperationFailed);
+        return fail_after_restore(registration, &previous);
     }
     Ok(IntegrationStatus::Disabled)
 }
@@ -73,16 +75,24 @@ pub fn repair_startup(
     now: i64,
 ) -> Result<IntegrationStatus, StartupError> {
     let previous = registration.snapshot()?;
-    registration.enable()?;
-    if !registration.is_enabled().unwrap_or(false) {
-        registration.restore(&previous)?;
-        return Err(StartupError::OperationFailed);
+    if registration.enable().is_err() {
+        return fail_after_restore(registration, &previous);
+    }
+    if !matches!(registration.is_enabled(), Ok(true)) {
+        return fail_after_restore(registration, &previous);
     }
     if persist_startup(store, true, Some(current), now).is_err() {
-        registration.restore(&previous)?;
-        return Err(StartupError::OperationFailed);
+        return fail_after_restore(registration, &previous);
     }
     Ok(IntegrationStatus::Enabled)
+}
+
+fn fail_after_restore(
+    registration: &dyn StartupRegistration,
+    previous: &StartupRegistrationSnapshot,
+) -> Result<IntegrationStatus, StartupError> {
+    let _ = registration.restore(previous);
+    Err(StartupError::OperationFailed)
 }
 
 fn persist_startup(

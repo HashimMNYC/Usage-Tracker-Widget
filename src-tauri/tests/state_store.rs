@@ -93,6 +93,39 @@ fn a_delayed_older_writer_cannot_replace_a_newer_provider_snapshot() {
 }
 
 #[test]
+fn a_delayed_equal_timestamp_writer_keeps_the_first_provider_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let mut first = valid_snapshot();
+    first.short_window.used_percent = 41.0;
+    let mut delayed = valid_snapshot();
+    delayed.short_window.used_percent = 77.0;
+    let (first_committed_tx, first_committed_rx) = mpsc::channel();
+    let delayed_path = path.clone();
+    let delayed_writer = thread::spawn(move || {
+        first_committed_rx.recv().unwrap();
+        JsonStateStore::new(delayed_path)
+            .apply(NOW, StateMutation::UpsertSnapshot(delayed))
+            .unwrap()
+    });
+
+    JsonStateStore::new(path.clone())
+        .apply(NOW, StateMutation::UpsertSnapshot(first.clone()))
+        .unwrap();
+    first_committed_tx.send(()).unwrap();
+    let returned_to_delayed_writer = delayed_writer.join().unwrap();
+
+    assert_eq!(
+        returned_to_delayed_writer.snapshots[&ProviderId::Codex],
+        first
+    );
+    assert_eq!(
+        JsonStateStore::new(path).load(NOW).unwrap().snapshots[&ProviderId::Codex],
+        first
+    );
+}
+
+#[test]
 fn rejects_an_invalid_candidate_without_replacing_current_state() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("state.json");

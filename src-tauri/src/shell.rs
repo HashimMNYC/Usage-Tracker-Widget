@@ -171,12 +171,7 @@ impl StartupRegistration for TauriStartupRegistration {
     }
 
     fn restore(&self, snapshot: &StartupRegistrationSnapshot) -> Result<(), StartupError> {
-        restore_startup_value(STARTUP_RUN_KEY, REG_SZ, snapshot.run_value.as_deref())?;
-        restore_startup_value(
-            STARTUP_APPROVED_KEY,
-            REG_BINARY,
-            snapshot.startup_approved_value.as_deref(),
-        )
+        restore_startup_snapshot_with(snapshot, restore_startup_value)
     }
 
     fn enable(&self) -> Result<(), StartupError> {
@@ -198,6 +193,23 @@ impl StartupRegistration for TauriStartupRegistration {
             .autolaunch()
             .is_enabled()
             .map_err(|_| StartupError::Unavailable)
+    }
+}
+
+fn restore_startup_snapshot_with(
+    snapshot: &StartupRegistrationSnapshot,
+    mut restore: impl FnMut(&str, RegType, Option<&[u8]>) -> Result<(), StartupError>,
+) -> Result<(), StartupError> {
+    let run_result = restore(STARTUP_RUN_KEY, REG_SZ, snapshot.run_value.as_deref());
+    let approved_result = restore(
+        STARTUP_APPROVED_KEY,
+        REG_BINARY,
+        snapshot.startup_approved_value.as_deref(),
+    );
+    if run_result.is_err() || approved_result.is_err() {
+        Err(StartupError::OperationFailed)
+    } else {
+        Ok(())
     }
 }
 
@@ -961,4 +973,30 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod startup_restore_tests {
+    use super::*;
+
+    #[test]
+    fn restore_attempts_startup_approved_after_run_restoration_fails() {
+        let snapshot = StartupRegistrationSnapshot {
+            run_value: Some(vec![1, 2, 3]),
+            startup_approved_value: Some(vec![4, 5, 6]),
+        };
+        let mut attempted = Vec::new();
+
+        let result = restore_startup_snapshot_with(&snapshot, |key, _value_type, _bytes| {
+            attempted.push(key.to_owned());
+            if key == STARTUP_RUN_KEY {
+                Err(StartupError::OperationFailed)
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(result, Err(StartupError::OperationFailed));
+        assert_eq!(attempted, vec![STARTUP_RUN_KEY, STARTUP_APPROVED_KEY]);
+    }
 }
