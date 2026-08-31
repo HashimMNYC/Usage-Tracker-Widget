@@ -1,4 +1,5 @@
 pub mod claude_settings;
+pub mod coordinator;
 pub mod diagnostics;
 pub mod model;
 pub mod paths;

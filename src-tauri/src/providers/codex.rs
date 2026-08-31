@@ -190,6 +190,10 @@ impl CodexCollector {
         Self { roots }
     }
 
+    pub(crate) fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     pub fn initial_scan(&self, now: i64) -> CollectResult {
         self.collect(discover_candidate_files(&self.roots), now)
     }
