@@ -2,16 +2,20 @@ export const METER_CELLS = 10;
 
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-export const remainingPercent = (used) => Math.round(clamp(100 - used, 0, 100));
+const isFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+export const remainingPercent = (used) => isFiniteNumber(used) ? Math.round(clamp(100 - used, 0, 100)) : 0;
 
 export function meterText(remaining) {
-  const cells = clamp(Math.round(remaining / 10), 0, METER_CELLS);
+  const cells = isFiniteNumber(remaining) ? clamp(Math.round(remaining / 10), 0, METER_CELLS) : 0;
   return `[${"█".repeat(cells)}${"░".repeat(METER_CELLS - cells)}]`;
 }
 
-export const meterTone = (remaining) => remaining < 10 ? "red" : remaining < 30 ? "amber" : "provider";
+export const meterTone = (remaining) => !isFiniteNumber(remaining) || remaining < 10 ? "red" : remaining < 30 ? "amber" : "provider";
 
 export function formatCountdown(resetsAtSeconds, nowMs) {
+  if (!isFiniteNumber(resetsAtSeconds) || !isFiniteNumber(nowMs)) return "00M 00S";
   let seconds = Math.max(0, Math.floor(resetsAtSeconds - nowMs / 1000));
   const days = Math.floor(seconds / 86400); seconds %= 86400;
   const hours = Math.floor(seconds / 3600); seconds %= 3600;
@@ -23,18 +27,59 @@ export function formatCountdown(resetsAtSeconds, nowMs) {
 }
 
 export function visibleProviders(view, nowSeconds) {
-  const order = new Map([["codex", 0], ["claude", 1]]);
-  return (view.providers ?? []).filter((item) =>
-    order.has(item.provider) &&
-    item.short_window?.duration_minutes === 300 &&
-    item.weekly_window?.duration_minutes === 10080 &&
-    item.short_window.resets_at > nowSeconds &&
-    item.weekly_window.resets_at > nowSeconds &&
-    Number.isFinite(item.short_window.used_percent) &&
-    Number.isFinite(item.weekly_window.used_percent) &&
-    item.short_window.used_percent >= 0 && item.short_window.used_percent <= 100 &&
-    item.weekly_window.used_percent >= 0 && item.weekly_window.used_percent <= 100
-  ).sort((a, b) => order.get(a.provider) - order.get(b.provider));
+  if (!isRecord(view) || !Array.isArray(view.providers) || !isFiniteNumber(nowSeconds)) return [];
+
+  const candidates = new Map([["codex", []], ["claude", []]]);
+  for (const item of view.providers) {
+    if (!isRecord(item) || !candidates.has(item.provider) || !isFiniteNumber(item.observed_at)) continue;
+    const shortWindow = item.short_window;
+    const weeklyWindow = item.weekly_window;
+    if (!isRecord(shortWindow) || !isRecord(weeklyWindow)) continue;
+    if (
+      shortWindow.duration_minutes !== 300 ||
+      weeklyWindow.duration_minutes !== 10080 ||
+      !isFiniteNumber(shortWindow.resets_at) ||
+      !isFiniteNumber(weeklyWindow.resets_at) ||
+      shortWindow.resets_at <= nowSeconds ||
+      weeklyWindow.resets_at <= nowSeconds ||
+      !isFiniteNumber(shortWindow.used_percent) ||
+      !isFiniteNumber(weeklyWindow.used_percent) ||
+      shortWindow.used_percent < 0 || shortWindow.used_percent > 100 ||
+      weeklyWindow.used_percent < 0 || weeklyWindow.used_percent > 100
+    ) continue;
+    candidates.get(item.provider).push(item);
+  }
+
+  return ["codex", "claude"].flatMap((provider) => {
+    const matches = candidates.get(provider);
+    return matches.length === 1 ? matches : [];
+  });
 }
 
 export const layoutForProviderCount = (count) => count === 0 ? "empty" : count === 1 ? "single" : "dual";
+
+export function createLatestOnlyRefresh(request, commit) {
+  let pending = false;
+  let refreshQueued = false;
+
+  const run = async () => {
+    if (pending) {
+      refreshQueued = true;
+      return;
+    }
+
+    pending = true;
+    try {
+      const view = await request();
+      if (!refreshQueued) commit(view);
+    } finally {
+      pending = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        return run();
+      }
+    }
+  };
+
+  return {run};
+}

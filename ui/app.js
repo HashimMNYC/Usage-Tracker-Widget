@@ -1,6 +1,6 @@
 import { getWidgetView, hideWidget, refresh, setWidgetLayout } from "./bridge.js";
 import { renderProviders, updateCountdowns } from "./render.js";
-import { layoutForProviderCount, visibleProviders } from "./ui-model.js";
+import { createLatestOnlyRefresh, layoutForProviderCount, visibleProviders } from "./ui-model.js";
 
 const providersElement = document.querySelector("#providers");
 const hideButton = document.querySelector("#hide-widget");
@@ -28,14 +28,21 @@ function renderCurrentView(forceRender = false) {
   }
 }
 
-async function loadView(viewRequest) {
+function applyView(view) {
+  currentView = view;
+  renderCurrentView(true);
+}
+
+async function loadInitialView() {
   try {
-    currentView = await viewRequest();
-    renderCurrentView(true);
+    applyView(await getWidgetView());
   } catch {
+    currentView = {providers: []};
     renderCurrentView();
   }
 }
+
+const refreshGate = createLatestOnlyRefresh(refresh, applyView);
 
 function hide() {
   void hideWidget().catch(() => {});
@@ -48,6 +55,6 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") hide();
 });
 
-void loadView(getWidgetView);
-setInterval(() => void loadView(refresh), 5_000);
+void loadInitialView();
+setInterval(() => void refreshGate.run().catch(() => {}), 5_000);
 setInterval(() => renderCurrentView(), 1_000);

@@ -34,3 +34,59 @@ test("hides incomplete and expired providers", () => {
   assert.equal(layoutForProviderCount(1), "single");
   assert.equal(layoutForProviderCount(2), "dual");
 });
+
+test("fails closed for malformed provider views and fields", () => {
+  const valid = {
+    provider: "codex",
+    observed_at: 90,
+    short_window: {duration_minutes: 300, used_percent: 10, resets_at: 200},
+    weekly_window: {duration_minutes: 10080, used_percent: 20, resets_at: 300}
+  };
+  const malformedViews = [
+    null,
+    {providers: "not-an-array"},
+    {providers: [null, "codex", 42]},
+    {providers: [{...valid, observed_at: undefined}]},
+    {providers: [{...valid, observed_at: Infinity}]},
+    {providers: [{...valid, short_window: {...valid.short_window, resets_at: "200"}}]},
+    {providers: [{...valid, short_window: {...valid.short_window, resets_at: Infinity}}]},
+    {providers: [{...valid, weekly_window: {...valid.weekly_window, resets_at: "300"}}]}
+  ];
+
+  for (const view of malformedViews) {
+    assert.deepEqual(visibleProviders(view, 100), []);
+  }
+});
+
+test("fails closed on duplicate identities and keeps fixed provider order", () => {
+  const codex = {
+    provider: "codex",
+    observed_at: 90,
+    short_window: {duration_minutes: 300, used_percent: 10, resets_at: 200},
+    weekly_window: {duration_minutes: 10080, used_percent: 20, resets_at: 300}
+  };
+  const claude = {
+    provider: "claude",
+    observed_at: 90,
+    short_window: {duration_minutes: 300, used_percent: 10, resets_at: 200},
+    weekly_window: {duration_minutes: 10080, used_percent: 20, resets_at: 300}
+  };
+
+  assert.deepEqual(
+    visibleProviders({providers: [claude, codex]}, 100).map((item) => item.provider),
+    ["codex", "claude"]
+  );
+  assert.deepEqual(
+    visibleProviders({providers: [codex, codex, claude]}, 100).map((item) => item.provider),
+    ["claude"]
+  );
+  assert.deepEqual(visibleProviders({providers: [codex, codex]}, 100), []);
+});
+
+test("uses safe text defaults for invalid numeric presentation input", () => {
+  assert.equal(remainingPercent(Number.NaN), 0);
+  assert.equal(meterText(Number.NaN), "[░░░░░░░░░░]");
+  assert.equal(formatCountdown(Number.NaN, 1_000), "00M 00S");
+  assert.equal(formatCountdown(Infinity, 1_000), "00M 00S");
+  assert.equal(formatCountdown(100, Infinity), "00M 00S");
+});
