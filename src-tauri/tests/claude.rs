@@ -2,7 +2,6 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex},
 };
 
@@ -730,19 +729,4 @@ fn rollback_never_overwrites_concurrent_user_edits_for_any_operation() {
     for operation in ["enable", "disable", "repair"] {
         assert_concurrent_edit_survives_failed_state_update(operation);
     }
-}
-
-#[test]
-fn intermediate_binary_routes_non_capture_invocations_to_fixed_failure() {
-    let output = Command::new(std::env::var("CARGO_BIN_EXE_usage-widget").unwrap())
-        .arg("not-capture")
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        output.stderr,
-        b"Usage Widget GUI is not available in this intermediate build.\n"
-    );
 }

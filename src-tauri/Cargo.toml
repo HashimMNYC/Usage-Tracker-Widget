@@ -16,7 +16,23 @@ serde_json = "1"
 tempfile = "3.27.0"
 thiserror = "2"
 walkdir = "2.5.0"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[dependencies.tauri]
+version = "2.11.5"
+features = ["tray-icon"]
+
+[dependencies.tauri-plugin-autostart]
+version = "2.5.1"
+
+[dependencies.tauri-plugin-dialog]
+version = "2.7.3"
+
+[dependencies.tauri-plugin-single-instance]
+version = "2.4.4"
+
+[build-dependencies]
+tauri-build = "2.6.3"
 
 [profile.release]
 codegen-units = 1
