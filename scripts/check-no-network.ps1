@@ -75,6 +75,25 @@ function Select-ProcessTreeConnections {
     }
 }
 
+function Write-NetworkConnectionRows {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Connections
+    )
+
+    foreach ($connection in $Connections) {
+        [Console]::Out.WriteLine(
+            ("{0}`t{1}`t{2}" -f `
+                [int]$connection.PID, `
+                [string]$connection.State, `
+                [string]$connection.RemoteAddress)
+        )
+    }
+    [Console]::Out.Flush()
+}
+
 function New-InspectionAggregateException {
     param(
         [Parameter(Mandatory = $true)]
@@ -775,9 +794,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (-not $result.Complete) {
         exit 2
     }
-    $result.Connections | Write-Output
     if ($result.Connections.Count -eq 0) {
         exit 0
     }
+    Write-NetworkConnectionRows -Connections @($result.Connections)
     exit 1
 }
