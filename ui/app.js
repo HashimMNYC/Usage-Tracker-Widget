@@ -1,14 +1,16 @@
-import { getWidgetView, hideWidget, refresh, setWidgetLayout } from "./bridge.js";
+import { getWidgetView, hideWidget, refresh, setWidgetHeight } from "./bridge.js";
 import { renderProviders, updateCountdowns } from "./render.js";
-import { createLatestOnlyRefresh, createLayoutSynchronizer, visibleProviders } from "./ui-model.js";
+import {
+  createHeightSynchronizer, createLatestOnlyRefresh, measuredWidgetHeight, visibleProviders
+} from "./ui-model.js";
 
 const providersElement = document.querySelector("#providers");
 const hideButton = document.querySelector("#hide-widget");
 let currentView = {providers: []};
-let visibleCount = -1;
-const layoutSynchronizer = createLayoutSynchronizer(setWidgetLayout, (count) => {
-  visibleCount = count;
-});
+let renderedStructure = "";
+let measurementFrame = null;
+let bodyObserver = null;
+const heightSynchronizer = createHeightSynchronizer(setWidgetHeight, () => {});
 
 function currentProviders() {
   return visibleProviders(currentView, Date.now() / 1000);
@@ -17,17 +19,28 @@ function currentProviders() {
 function renderCurrentView(forceRender = false) {
   const nowMs = Date.now();
   const providers = currentProviders();
-  const nextCount = providers.length;
+  const nextStructure = providers.map((provider) => [
+    provider.provider,
+    provider.short_window == null ? "" : "5h",
+    provider.weekly_window == null ? "" : "7d"
+  ].join(":")).join("|");
 
-  if (forceRender || nextCount !== visibleCount) {
+  if (forceRender || nextStructure !== renderedStructure) {
     renderProviders(providersElement, providers, nowMs);
+    renderedStructure = nextStructure;
   } else {
     updateCountdowns(providersElement, nowMs);
   }
+  scheduleHeightSync();
+}
 
-  if (nextCount !== visibleCount) {
-    void layoutSynchronizer.sync(nextCount).catch(() => {});
-  }
+function scheduleHeightSync() {
+  if (measurementFrame !== null) return;
+  measurementFrame = requestAnimationFrame(() => {
+    measurementFrame = null;
+    const height = measuredWidgetHeight(document.body);
+    if (height !== null) void heightSynchronizer.sync(height).catch(() => {});
+  });
 }
 
 function applyView(view) {
@@ -56,6 +69,12 @@ hideButton.addEventListener("click", hide);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") hide();
 });
+
+if ("ResizeObserver" in window) {
+  bodyObserver = new ResizeObserver(scheduleHeightSync);
+  bodyObserver.observe(document.body);
+}
+window.addEventListener("resize", scheduleHeightSync);
 
 void loadInitialView();
 setInterval(() => void refreshGate.run().catch(() => {}), 5_000);

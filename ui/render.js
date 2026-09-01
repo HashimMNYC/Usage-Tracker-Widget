@@ -1,4 +1,6 @@
-import { formatCountdown, meterText, meterTone, remainingPercent } from "./ui-model.js";
+import {
+  formatCountdown, meterText, meterTone, providerWindowEntries, remainingPercent
+} from "./ui-model.js";
 
 const providerName = (provider) => provider === "codex" ? "CODEX" : "CLAUDE";
 
@@ -35,11 +37,10 @@ function createWindowRow(provider, label, window, nowMs) {
 
 function createProviderCard(provider, nowMs) {
   const card = createElement("article", `provider-card provider--${provider.provider}`);
-  card.append(
-    createElement("h2", "provider-heading", providerName(provider.provider)),
-    createWindowRow(provider.provider, "5H", provider.short_window, nowMs),
-    createWindowRow(provider.provider, "7D", provider.weekly_window, nowMs)
-  );
+  card.append(createElement("h2", "provider-heading", providerName(provider.provider)));
+  for (const [label, window] of providerWindowEntries(provider)) {
+    card.append(createWindowRow(provider.provider, label, window, nowMs));
+  }
   return card;
 }
 

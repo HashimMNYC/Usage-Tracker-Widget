@@ -29,17 +29,23 @@ fn valid_snapshot() -> ProviderSnapshot {
     ProviderSnapshot {
         provider: ProviderId::Codex,
         observed_at: NOW - 10,
-        short_window: WindowSnapshot {
+        short_window: Some(WindowSnapshot {
             duration_minutes: 300,
             used_percent: 38.4,
             resets_at: NOW + 3_600,
-        },
-        weekly_window: WindowSnapshot {
+        }),
+        weekly_window: Some(WindowSnapshot {
             duration_minutes: 10_080,
             used_percent: 62.0,
             resets_at: NOW + 86_400,
-        },
+        }),
     }
+}
+
+fn valid_claude_snapshot() -> ProviderSnapshot {
+    let mut snapshot = valid_snapshot();
+    snapshot.provider = ProviderId::Claude;
+    snapshot
 }
 
 #[test]
@@ -63,10 +69,10 @@ fn a_delayed_older_writer_cannot_replace_a_newer_provider_snapshot() {
     let path = temp.path().join("state.json");
     let mut older = valid_snapshot();
     older.observed_at = NOW - 20;
-    older.short_window.used_percent = 20.0;
+    older.short_window.as_mut().unwrap().used_percent = 20.0;
     let mut newer = valid_snapshot();
     newer.observed_at = NOW - 5;
-    newer.short_window.used_percent = 55.0;
+    newer.short_window.as_mut().unwrap().used_percent = 55.0;
     let (newer_committed_tx, newer_committed_rx) = mpsc::channel();
     let older_path = path.clone();
     let older_writer = thread::spawn(move || {
@@ -97,9 +103,9 @@ fn a_delayed_equal_timestamp_writer_keeps_the_first_provider_snapshot() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("state.json");
     let mut first = valid_snapshot();
-    first.short_window.used_percent = 41.0;
+    first.short_window.as_mut().unwrap().used_percent = 41.0;
     let mut delayed = valid_snapshot();
-    delayed.short_window.used_percent = 77.0;
+    delayed.short_window.as_mut().unwrap().used_percent = 77.0;
     let (first_committed_tx, first_committed_rx) = mpsc::channel();
     let delayed_path = path.clone();
     let delayed_writer = thread::spawn(move || {
@@ -135,7 +141,7 @@ fn rejects_an_invalid_candidate_without_replacing_current_state() {
         .unwrap();
     let original_bytes = fs::read(&path).unwrap();
     let mut invalid = valid_snapshot();
-    invalid.short_window.used_percent = 100.1;
+    invalid.short_window.as_mut().unwrap().used_percent = 100.1;
 
     let result = store.apply(NOW, StateMutation::UpsertSnapshot(invalid));
 
@@ -159,6 +165,83 @@ fn current_projection_omits_an_expired_stored_snapshot() {
 
     assert_eq!(stored.snapshots.len(), 1);
     assert!(stored.current_snapshots(NOW + 86_400).is_empty());
+}
+
+#[test]
+fn schema_one_migration_drops_untrusted_codex_and_preserves_valid_user_state() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let store = JsonStateStore::new(path.clone());
+    let mut legacy = PersistedState {
+        schema_version: 1,
+        ..PersistedState::default()
+    };
+    legacy.snapshots.insert(ProviderId::Codex, valid_snapshot());
+    legacy
+        .snapshots
+        .insert(ProviderId::Claude, valid_claude_snapshot());
+    legacy.window = Some(WindowPlacement { x: 120, y: -40 });
+    legacy.always_on_top = false;
+    legacy.launch_at_signin_requested = true;
+    legacy.startup_identity = Some(StartupIdentity {
+        installed_exe: "C:\\Apps\\UsageWidget.exe".into(),
+    });
+    legacy.claude_tracking = Some(ClaudeTrackingIdentity {
+        installed_exe: "C:\\Apps\\UsageWidget.exe".into(),
+        installed_status_line: json!({"type": "command", "command": "widget"}),
+    });
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    let loaded = store.load(NOW).unwrap();
+
+    assert_eq!(loaded.schema_version, STATE_SCHEMA_VERSION);
+    assert!(!loaded.snapshots.contains_key(&ProviderId::Codex));
+    assert_eq!(
+        loaded.snapshots[&ProviderId::Claude],
+        valid_claude_snapshot()
+    );
+    assert_eq!(loaded.window, legacy.window);
+    assert_eq!(loaded.always_on_top, legacy.always_on_top);
+    assert_eq!(
+        loaded.launch_at_signin_requested,
+        legacy.launch_at_signin_requested
+    );
+    assert_eq!(loaded.startup_identity, legacy.startup_identity);
+    assert_eq!(loaded.claude_tracking, legacy.claude_tracking);
+
+    store
+        .apply(NOW, StateMutation::SetAlwaysOnTop(true))
+        .unwrap();
+    let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(persisted["schema_version"], json!(STATE_SCHEMA_VERSION));
+    assert!(persisted["snapshots"].get("codex").is_none());
+}
+
+#[test]
+fn partial_claude_state_is_quarantined_and_never_projected() {
+    for missing in ["short_window", "weekly_window"] {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("state.json");
+        let mut state = PersistedState::default();
+        state
+            .snapshots
+            .insert(ProviderId::Claude, valid_claude_snapshot());
+        let mut value = serde_json::to_value(state).unwrap();
+        value["snapshots"]["claude"]
+            .as_object_mut()
+            .unwrap()
+            .remove(missing);
+        let original = serde_json::to_vec(&value).unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let loaded = JsonStateStore::new(path.clone()).load(NOW).unwrap();
+
+        assert_eq!(loaded, PersistedState::default());
+        assert!(!path.exists());
+        let quarantined = quarantined_state_files(temp.path());
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(fs::read(&quarantined[0]).unwrap(), original);
+    }
 }
 
 #[test]
@@ -207,8 +290,8 @@ fn quarantined_state_files(directory: &Path) -> Vec<std::path::PathBuf> {
 fn structurally_corrupt_current_schema_is_quarantined_and_defaults_are_loaded() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("state.json");
-    let original = br#"{"schema_version":1,"snapshots":[],"window":null,"always_on_top":true,"launch_at_signin_requested":false,"startup_identity":null,"claude_tracking":null}"#;
-    fs::write(&path, original).unwrap();
+    let original = format!(r#"{{"schema_version":{STATE_SCHEMA_VERSION},"snapshots":[],"window":null,"always_on_top":true,"launch_at_signin_requested":false,"startup_identity":null,"claude_tracking":null}}"#).into_bytes();
+    fs::write(&path, &original).unwrap();
 
     let loaded = JsonStateStore::new(path.clone()).load(NOW).unwrap();
 
@@ -243,8 +326,9 @@ fn semantically_corrupt_current_schema_is_quarantined_and_defaults_are_loaded() 
 fn apply_rebuilds_state_after_quarantining_current_schema_corruption() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("state.json");
-    let original = br#"{"schema_version":1,"snapshots":"invalid"}"#;
-    fs::write(&path, original).unwrap();
+    let original = format!(r#"{{"schema_version":{STATE_SCHEMA_VERSION},"snapshots":"invalid"}}"#)
+        .into_bytes();
+    fs::write(&path, &original).unwrap();
     let store = JsonStateStore::new(path.clone());
 
     let rebuilt = store

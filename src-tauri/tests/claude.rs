@@ -18,7 +18,7 @@ use usage_widget::{
     },
     state_store::{
         ClaudeTrackingIdentity, JsonStateStore, PersistedState, StateError, StateMutation,
-        StateStore,
+        StateStore, STATE_SCHEMA_VERSION,
     },
 };
 
@@ -38,16 +38,16 @@ fn existing_claude_snapshot() -> ProviderSnapshot {
     ProviderSnapshot {
         provider: ProviderId::Claude,
         observed_at: NOW - 10,
-        short_window: WindowSnapshot {
+        short_window: Some(WindowSnapshot {
             duration_minutes: 300,
             used_percent: 7.0,
             resets_at: NOW + 7_200,
-        },
-        weekly_window: WindowSnapshot {
+        }),
+        weekly_window: Some(WindowSnapshot {
             duration_minutes: 10_080,
             used_percent: 11.0,
             resets_at: NOW + 172_800,
-        },
+        }),
     }
 }
 
@@ -120,8 +120,14 @@ fn parses_only_complete_exact_limits_and_renders_remaining() {
 
     assert_eq!(snapshot.provider, ProviderId::Claude);
     assert_eq!(snapshot.observed_at, NOW);
-    assert_eq!(snapshot.short_window.duration_minutes, 300);
-    assert_eq!(snapshot.weekly_window.duration_minutes, 10_080);
+    assert_eq!(
+        snapshot.short_window.as_ref().unwrap().duration_minutes,
+        300
+    );
+    assert_eq!(
+        snapshot.weekly_window.as_ref().unwrap().duration_minutes,
+        10_080
+    );
     assert_eq!(
         render_capture_status(&snapshot),
         "USAGE 5H 77% LEFT | 7D 59% LEFT"
@@ -194,6 +200,8 @@ fn reset_numbers_must_have_an_exact_in_range_i64_representation() {
             parse_claude_statusline(input.to_string().as_bytes(), NOW)
                 .unwrap()
                 .short_window
+                .as_ref()
+                .unwrap()
                 .resets_at,
             expected
         );
@@ -272,16 +280,17 @@ fn valid_capture_persists_normalized_snapshot_before_printing() {
     assert_eq!(stdout, b"USAGE 5H 77% LEFT | 7D 59% LEFT\n");
     assert!(stderr.is_empty());
     let stored = &store.snapshot().snapshots[&ProviderId::Claude];
-    assert_eq!(stored.short_window.used_percent, 23.0);
-    assert_eq!(stored.weekly_window.used_percent, 41.0);
+    assert_eq!(stored.short_window.as_ref().unwrap().used_percent, 23.0);
+    assert_eq!(stored.weekly_window.as_ref().unwrap().used_percent, 41.0);
 }
 
 #[test]
 fn valid_capture_recovers_from_structurally_corrupt_current_state() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("state.json");
-    let original = br#"{"schema_version":1,"snapshots":"invalid"}"#;
-    fs::write(&path, original).unwrap();
+    let original = format!(r#"{{"schema_version":{STATE_SCHEMA_VERSION},"snapshots":"invalid"}}"#)
+        .into_bytes();
+    fs::write(&path, &original).unwrap();
     let store = JsonStateStore::new(path.clone());
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -300,6 +309,8 @@ fn valid_capture_recovers_from_structurally_corrupt_current_state() {
     assert_eq!(
         store.load(NOW).unwrap().snapshots[&ProviderId::Claude]
             .short_window
+            .as_ref()
+            .unwrap()
             .used_percent,
         23.0
     );

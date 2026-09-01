@@ -42,6 +42,24 @@ fn complete_record(observed_at: i64) -> Value {
     })
 }
 
+fn general_weekly_record(observed_at: i64, used_percent: f64) -> Value {
+    json!({
+        "timestamp": observed_at,
+        "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "limit_id": "codex",
+                "primary": {
+                    "used_percent": used_percent,
+                    "window_minutes": 10_080,
+                    "resets_at": NOW + 86_400
+                },
+                "secondary": null
+            }
+        }
+    })
+}
+
 fn write_jsonl(path: &Path, records: &[Value]) {
     let body = records
         .iter()
@@ -76,10 +94,49 @@ fn extracts_complete_snapshot_and_classifies_windows_by_exact_duration() {
 
     assert_eq!(snapshot.provider, ProviderId::Codex);
     assert_eq!(snapshot.observed_at, NOW - 10);
-    assert_eq!(snapshot.short_window.duration_minutes, 300);
-    assert_eq!(snapshot.short_window.used_percent, 38.4);
-    assert_eq!(snapshot.weekly_window.duration_minutes, 10_080);
-    assert_eq!(snapshot.weekly_window.used_percent, 62.0);
+    assert_eq!(
+        snapshot.short_window.as_ref().unwrap().duration_minutes,
+        300
+    );
+    assert_eq!(snapshot.short_window.as_ref().unwrap().used_percent, 38.4);
+    assert_eq!(
+        snapshot.weekly_window.as_ref().unwrap().duration_minutes,
+        10_080
+    );
+    assert_eq!(snapshot.weekly_window.as_ref().unwrap().used_percent, 62.0);
+}
+
+#[test]
+fn accepts_general_weekly_only_limit_without_fabricating_a_short_window() {
+    let snapshot = extract_codex_snapshot(&general_weekly_record(NOW - 5, 35.0), NOW - 10, NOW)
+        .expect("the exact general weekly limit must be usable by itself");
+    let value = serde_json::to_value(snapshot).unwrap();
+
+    assert_eq!(value["weekly_window"]["used_percent"], json!(35.0));
+    assert!(value.get("short_window").is_none_or(Value::is_null));
+}
+
+#[test]
+fn rejects_legacy_weekly_only_limit_without_the_general_limit_id() {
+    let mut legacy_partial = general_weekly_record(NOW - 5, 35.0);
+    legacy_partial["payload"]["rate_limits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("limit_id");
+
+    assert_eq!(
+        extract_codex_snapshot(&legacy_partial, NOW - 10, NOW),
+        Err(ExtractError::MissingWindow)
+    );
+}
+
+#[test]
+fn rejects_a_named_model_specific_limit_as_general_codex_usage() {
+    let mut model_specific = complete_record(NOW - 5);
+    model_specific["payload"]["rate_limits"]["limit_id"] = json!("codex_bengalfox");
+    model_specific["payload"]["rate_limits"]["limit_name"] = json!("GPT-5.3-Codex-Spark");
+
+    assert!(extract_codex_snapshot(&model_specific, NOW - 10, NOW).is_err());
 }
 
 #[test]
@@ -109,8 +166,8 @@ fn reversed_window_labels_and_unknown_children_do_not_change_duration_classifica
 
     let snapshot = extract_codex_snapshot(&record, NOW - 20, NOW).unwrap();
 
-    assert_eq!(snapshot.short_window.used_percent, 25.0);
-    assert_eq!(snapshot.weekly_window.used_percent, 55.0);
+    assert_eq!(snapshot.short_window.as_ref().unwrap().used_percent, 25.0);
+    assert_eq!(snapshot.weekly_window.as_ref().unwrap().used_percent, 55.0);
 }
 
 #[test]
@@ -194,8 +251,14 @@ fn normalizes_epoch_milliseconds_and_rfc3339_reset_timestamps() {
 
     let snapshot = extract_codex_snapshot(&record, NOW - 20, NOW).unwrap();
 
-    assert_eq!(snapshot.short_window.resets_at, NOW + 3_600);
-    assert_eq!(snapshot.weekly_window.resets_at, NOW + 86_400);
+    assert_eq!(
+        snapshot.short_window.as_ref().unwrap().resets_at,
+        NOW + 3_600
+    );
+    assert_eq!(
+        snapshot.weekly_window.as_ref().unwrap().resets_at,
+        NOW + 86_400
+    );
 }
 
 #[test]

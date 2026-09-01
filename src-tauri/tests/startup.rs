@@ -7,9 +7,9 @@ use usage_widget::{
     claude_settings::ClaudeTrackingState,
     providers::claude::capture_mode_from_args,
     shell::{
-        clamp_position, claude_tray_action, claude_tray_label, finish_gui_setup,
-        gui_start_error_message, height_for_layout, startup_tray_action, startup_tray_action_state,
-        GuiStartError, IntegrationStatus, Layout, TrayActionState, TrayIntegrationAction, WorkArea,
+        clamp_position, clamp_widget_height, claude_tray_action, claude_tray_label,
+        finish_gui_setup, gui_start_error_message, startup_tray_action, startup_tray_action_state,
+        GuiStartError, IntegrationStatus, TrayActionState, TrayIntegrationAction, WorkArea,
         ALWAYS_ON_TOP_LABEL, REFRESH_LABEL, SHOW_HIDE_LABEL, STARTUP_MANUAL_REVIEW_MESSAGE,
     },
     startup::{
@@ -429,10 +429,10 @@ fn requested_state(installed_exe: &Path) -> PersistedState {
 }
 
 #[test]
-fn layout_heights_match_the_three_widget_states() {
-    assert_eq!(height_for_layout(Layout::Empty), 102.0);
-    assert_eq!(height_for_layout(Layout::Single), 178.0);
-    assert_eq!(height_for_layout(Layout::Dual), 254.0);
+fn measured_window_height_is_bounded_without_reclassifying_content() {
+    assert_eq!(clamp_widget_height(0), 80.0);
+    assert_eq!(clamp_widget_height(190), 190.0);
+    assert_eq!(clamp_widget_height(10_000), 640.0);
 }
 
 #[test]

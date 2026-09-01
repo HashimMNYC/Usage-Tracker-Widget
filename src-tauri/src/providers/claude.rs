@@ -38,8 +38,8 @@ pub fn parse_claude_statusline(bytes: &[u8], now: i64) -> Result<ProviderSnapsho
     let snapshot = ProviderSnapshot {
         provider: ProviderId::Claude,
         observed_at: now,
-        short_window,
-        weekly_window,
+        short_window: Some(short_window),
+        weekly_window: Some(weekly_window),
     };
     snapshot.validate(now).map_err(|error| match error {
         ValidationError::ExpiredReset => CaptureError::Expired,
@@ -51,8 +51,20 @@ pub fn parse_claude_statusline(bytes: &[u8], now: i64) -> Result<ProviderSnapsho
 pub fn render_capture_status(snapshot: &ProviderSnapshot) -> String {
     format!(
         "USAGE 5H {}% LEFT | 7D {}% LEFT",
-        remaining_percent(snapshot.short_window.used_percent),
-        remaining_percent(snapshot.weekly_window.used_percent)
+        remaining_percent(
+            snapshot
+                .short_window
+                .as_ref()
+                .expect("validated Claude snapshot has a short window")
+                .used_percent,
+        ),
+        remaining_percent(
+            snapshot
+                .weekly_window
+                .as_ref()
+                .expect("validated Claude snapshot has a weekly window")
+                .used_percent,
+        )
     )
 }
 

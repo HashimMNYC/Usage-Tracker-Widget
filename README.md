@@ -1,6 +1,6 @@
 # Usage Widget
 
-Usage Widget is a portable Windows 11 x64 desktop app for exact, locally observed Claude Code and Codex subscription-limit windows. It shows the rounded percentage remaining and the time until reset for the five-hour and seven-day windows. It does not show API billing or spend.
+Usage Widget is a portable Windows 11 x64 desktop app for exact, locally observed Claude Code and Codex subscription-limit windows. It shows the rounded percentage remaining and the time until reset for each available five-hour or seven-day window. It does not show API billing or spend.
 
 ## Run it
 
@@ -19,11 +19,11 @@ The notification-area menu is the settings surface:
 
 ## What the numbers mean
 
-Codex data comes from local rollout JSONL files under `%CODEX_HOME%\sessions` and `%CODEX_HOME%\archived_sessions`, or `%USERPROFILE%\.codex\sessions` and `archived_sessions` when `CODEX_HOME` is unset. The collector accepts only a complete, current `rate_limits` record with exact 300-minute and 10,080-minute windows.
+Codex data comes from local rollout JSONL files under `%CODEX_HOME%\sessions` and `%CODEX_HOME%\archived_sessions`, or `%USERPROFILE%\.codex\sessions` and `archived_sessions` when `CODEX_HOME` is unset. Current records identified as the general `codex` limit may contain one or both exact 300-minute and 10,080-minute windows; the widget shows only the windows present in that record. Named model-specific limits are not substituted for the general account limit. Legacy records without a limit identifier are accepted only when both exact windows are present.
 
 Claude data arrives only through an opt-in Claude Code status-line command. The settings file is `%CLAUDE_CONFIG_DIR%\settings.json`, or `%USERPROFILE%\.claude\settings.json` when `CLAUDE_CONFIG_DIR` is unset. After tracking is enabled, Claude remains hidden until a later Claude response supplies one valid payload containing both exact windows. If the payload is incomplete, invalid, ambiguous, or expired, Claude stays hidden.
 
-For each valid window, the app calculates `round(clamp(100 - used percent, 0, 100))`. It does not estimate a percentage from tokens, messages, elapsed time, or a plan assumption. Reset text is a countdown to the exact locally observed reset timestamp. Data is only as fresh as the latest valid local CLI record or status-line payload.
+For each valid window, the app calculates `round(clamp(100 - used percent, 0, 100))`. A missing window is hidden rather than copied from another limit or estimated from tokens, messages, elapsed time, or a plan assumption. Reset text is a countdown to the exact locally observed reset timestamp. Data is only as fresh as the latest valid local CLI record or status-line payload.
 
 If neither provider has a valid current snapshot, the widget displays `NO CURRENT LIMIT DATA`.
 

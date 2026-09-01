@@ -27,7 +27,8 @@ use windows_sys::Win32::{
 
 use crate::model::{ProviderId, ProviderSnapshot};
 
-pub const STATE_SCHEMA_VERSION: u32 = 1;
+pub const STATE_SCHEMA_VERSION: u32 = 2;
+const LEGACY_STATE_SCHEMA_VERSION: u32 = 1;
 const MAX_STATE_BYTES: u64 = 1024 * 1024;
 const LOCK_WAIT_MILLISECONDS: u32 = 5_000;
 static QUARANTINE_NONCE: AtomicU64 = AtomicU64::new(0);
@@ -229,16 +230,22 @@ impl JsonStateStore {
             self.quarantine_corrupt()?;
             return Ok(PersistedState::default());
         };
-        if schema_version != u64::from(STATE_SCHEMA_VERSION) {
-            return Err(StateError::UnsupportedSchema);
-        }
-        let state: PersistedState = match serde_json::from_value(value) {
+        let migrate_legacy = match schema_version {
+            version if version == u64::from(STATE_SCHEMA_VERSION) => false,
+            version if version == u64::from(LEGACY_STATE_SCHEMA_VERSION) => true,
+            _ => return Err(StateError::UnsupportedSchema),
+        };
+        let mut state: PersistedState = match serde_json::from_value(value) {
             Ok(state) => state,
             Err(_) => {
                 self.quarantine_corrupt()?;
                 return Ok(PersistedState::default());
             }
         };
+        if migrate_legacy {
+            state.schema_version = STATE_SCHEMA_VERSION;
+            state.snapshots.remove(&ProviderId::Codex);
+        }
         if state.snapshots.iter().any(|(provider, snapshot)| {
             *provider != snapshot.provider || snapshot.validate(snapshot.observed_at).is_err()
         }) {

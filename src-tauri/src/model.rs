@@ -21,8 +21,10 @@ pub struct WindowSnapshot {
 pub struct ProviderSnapshot {
     pub provider: ProviderId,
     pub observed_at: i64,
-    pub short_window: WindowSnapshot,
-    pub weekly_window: WindowSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_window: Option<WindowSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekly_window: Option<WindowSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +35,8 @@ pub enum ValidationError {
     WrongDuration,
     #[error("invalid percentage")]
     InvalidPercent,
+    #[error("no usable windows")]
+    MissingWindows,
     #[error("reset has expired")]
     ExpiredReset,
 }
@@ -43,10 +47,15 @@ impl ProviderSnapshot {
             return Err(ValidationError::InvalidObservedAt);
         }
 
+        let mut windows = 0;
         for (window, expected) in [
-            (&self.short_window, SHORT_WINDOW_MINUTES),
-            (&self.weekly_window, WEEKLY_WINDOW_MINUTES),
+            (self.short_window.as_ref(), SHORT_WINDOW_MINUTES),
+            (self.weekly_window.as_ref(), WEEKLY_WINDOW_MINUTES),
         ] {
+            let Some(window) = window else {
+                continue;
+            };
+            windows += 1;
             if window.duration_minutes != expected {
                 return Err(ValidationError::WrongDuration);
             }
@@ -56,6 +65,13 @@ impl ProviderSnapshot {
             if window.resets_at <= now {
                 return Err(ValidationError::ExpiredReset);
             }
+        }
+
+        if windows == 0
+            || (self.provider == ProviderId::Claude
+                && (self.short_window.is_none() || self.weekly_window.is_none()))
+        {
+            return Err(ValidationError::MissingWindows);
         }
 
         Ok(())

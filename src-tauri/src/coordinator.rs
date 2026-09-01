@@ -627,7 +627,7 @@ mod tests {
             state: Mutex::new(initial),
         });
         let mut invalid = valid_snapshot(NOW - 10, NOW + 200);
-        invalid.short_window.used_percent = 101.0;
+        invalid.short_window.as_mut().unwrap().used_percent = 101.0;
         let collector = Arc::new(FakeCollector {
             result: Mutex::new(CollectResult {
                 snapshot: Some(invalid),
@@ -947,16 +947,16 @@ mod tests {
         ProviderSnapshot {
             provider: ProviderId::Codex,
             observed_at,
-            short_window: WindowSnapshot {
+            short_window: Some(WindowSnapshot {
                 duration_minutes: 300,
                 used_percent: 20.0,
                 resets_at,
-            },
-            weekly_window: WindowSnapshot {
+            }),
+            weekly_window: Some(WindowSnapshot {
                 duration_minutes: 10_080,
                 used_percent: 30.0,
                 resets_at,
-            },
+            }),
         }
     }
 }

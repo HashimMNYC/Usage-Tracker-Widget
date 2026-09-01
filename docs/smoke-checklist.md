@@ -38,9 +38,9 @@ This section may update app-owned state such as window position, but it must not
 
 - [ ] Launch `release\usage-widget.exe` and wait up to ten seconds for its process and window.
 - [ ] Launch the EXE a second time and confirm no second persistent GUI process remains; the original window is shown and focused.
-- [ ] Compare the Codex card with a sanitized projection from `python .\usagewidget.py once`. Pipe JSON through `ConvertFrom-Json` and output only provider name plus each window's numeric used percentage and reset epoch. Do not output source or roots fields.
+- [ ] Compare the Codex card with a sanitized current local `rate_limits` record whose `limit_id` is exactly `codex`, outputting only each window's numeric used percentage, duration, and reset epoch. Do not output source paths, record content, or other fields. Confirm named model-specific limits are not shown as the general Codex card.
 - [ ] Confirm the approved terminal-style glyphs, ten-cell meters, rounded remaining calculation, and reset countdowns.
-- [ ] Confirm the fixed width, drag behavior, always-on-top default, and saved on-screen position.
+- [ ] Confirm the fixed width, measured content height, absence of horizontal and vertical scrollbars, drag behavior, always-on-top default, and saved on-screen position.
 - [ ] Confirm `[x]` hides without exiting, Escape hides without exiting, and tray **Show/Hide** restores the same process.
 - [ ] Confirm tray **Refresh** completes without freezing the UI.
 - [ ] Confirm the Claude card stays hidden until a valid captured sample exists.

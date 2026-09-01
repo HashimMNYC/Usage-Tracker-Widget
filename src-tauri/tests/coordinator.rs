@@ -28,16 +28,16 @@ fn snapshot(observed_at: i64, short_reset: i64, weekly_reset: i64) -> ProviderSn
     ProviderSnapshot {
         provider: ProviderId::Codex,
         observed_at,
-        short_window: WindowSnapshot {
+        short_window: Some(WindowSnapshot {
             duration_minutes: 300,
             used_percent: 40.0,
             resets_at: short_reset,
-        },
-        weekly_window: WindowSnapshot {
+        }),
+        weekly_window: Some(WindowSnapshot {
             duration_minutes: 10_080,
             used_percent: 60.0,
             resets_at: weekly_reset,
-        },
+        }),
     }
 }
 
@@ -47,15 +47,38 @@ fn write_snapshot(path: &std::path::Path, value: &ProviderSnapshot) {
         "payload": {
             "rate_limits": {
                 "primary": {
-                    "used_percent": value.short_window.used_percent,
-                    "window_minutes": value.short_window.duration_minutes,
-                    "resets_at": value.short_window.resets_at
+                    "used_percent": value.short_window.as_ref().unwrap().used_percent,
+                    "window_minutes": value.short_window.as_ref().unwrap().duration_minutes,
+                    "resets_at": value.short_window.as_ref().unwrap().resets_at
                 },
                 "secondary": {
-                    "used_percent": value.weekly_window.used_percent,
-                    "window_minutes": value.weekly_window.duration_minutes,
-                    "resets_at": value.weekly_window.resets_at
+                    "used_percent": value.weekly_window.as_ref().unwrap().used_percent,
+                    "window_minutes": value.weekly_window.as_ref().unwrap().duration_minutes,
+                    "resets_at": value.weekly_window.as_ref().unwrap().resets_at
                 }
+            }
+        }
+    });
+    fs::write(path, format!("{record}\n")).unwrap();
+}
+
+fn write_general_weekly_snapshot(
+    path: &std::path::Path,
+    observed_at: i64,
+    used_percent: f64,
+    resets_at: i64,
+) {
+    let record = serde_json::json!({
+        "timestamp": observed_at,
+        "payload": {
+            "rate_limits": {
+                "limit_id": "codex",
+                "primary": {
+                    "used_percent": used_percent,
+                    "window_minutes": 10_080,
+                    "resets_at": resets_at
+                },
+                "secondary": null
             }
         }
     });
@@ -215,6 +238,45 @@ fn coordinator_refreshes_full_and_changed_candidates_transactionally() {
         store.state.lock().unwrap().snapshots[&ProviderId::Codex],
         changed
     );
+}
+
+#[test]
+fn legacy_cached_codex_never_outvotes_a_verified_general_limit() {
+    let temp = TempDir::new().unwrap();
+    for (case, retained_observed_at) in [("newer", NOW - 1), ("equal", NOW - 5)] {
+        let root = temp.path().join(case);
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_general_weekly_snapshot(&sessions.join("rollout.jsonl"), NOW - 5, 35.0, NOW + 86_400);
+
+        let mut legacy = PersistedState {
+            schema_version: 1,
+            ..PersistedState::default()
+        };
+        legacy.snapshots.insert(
+            ProviderId::Codex,
+            snapshot(retained_observed_at, NOW + 3_600, NOW + 172_800),
+        );
+        let state_path = root.join("state.json");
+        fs::write(&state_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let store = Arc::new(JsonStateStore::new(state_path));
+        let coordinator =
+            CollectionCoordinator::load(Arc::new(CodexCollector::new(vec![sessions])), store, NOW)
+                .unwrap();
+
+        coordinator.refresh_now(NOW).unwrap();
+        let current = coordinator.current_snapshots(NOW);
+        let value = serde_json::to_value(&current[0]).unwrap();
+
+        assert_eq!(
+            value["weekly_window"]["used_percent"],
+            serde_json::json!(35.0),
+            "legacy {case} snapshot won over the verified general limit"
+        );
+        assert!(value
+            .get("short_window")
+            .is_none_or(serde_json::Value::is_null));
+    }
 }
 
 #[test]

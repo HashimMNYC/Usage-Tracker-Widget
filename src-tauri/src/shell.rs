@@ -36,6 +36,9 @@ use crate::{
 const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "usage-widget";
 const WIDGET_WIDTH: f64 = 356.0;
+const INITIAL_WIDGET_HEIGHT: f64 = 220.0;
+const MIN_WIDGET_HEIGHT: u32 = 80;
+const MAX_WIDGET_HEIGHT: u32 = 640;
 const TITLE_HEIGHT: i32 = 36;
 const POSITION_DEBOUNCE: Duration = Duration::from_millis(300);
 const TRAY_ERROR_MESSAGE: &str = "Usage Widget could not complete that tray action.";
@@ -58,14 +61,6 @@ pub enum IntegrationStatus {
     Enabled,
     NeedsRepair,
     Conflict,
-}
-
-#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Layout {
-    Empty,
-    Single,
-    Dual,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -387,14 +382,14 @@ pub fn hide_widget(app: AppHandle) -> Result<(), CommandError> {
 }
 
 #[tauri::command]
-pub fn set_widget_layout(app: AppHandle, layout: Layout) -> Result<(), CommandError> {
+pub fn set_widget_height(app: AppHandle, height: u32) -> Result<(), CommandError> {
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .ok_or_else(window_error)?;
     window
         .set_size(tauri::Size::Logical(tauri::LogicalSize::new(
             WIDGET_WIDTH,
-            height_for_layout(layout),
+            clamp_widget_height(height),
         )))
         .map_err(|_| window_error())
 }
@@ -433,7 +428,7 @@ pub fn run_gui() -> Result<(), GuiStartError> {
             get_widget_view,
             refresh,
             hide_widget,
-            set_widget_layout
+            set_widget_height
         ])
         .setup(move |app| {
             let outcome = setup_app(app, coordinator, store, claude_settings);
@@ -488,14 +483,9 @@ fn configure_main_window(app: &AppHandle, persisted: &PersistedState) -> tauri::
         .get_webview_window(MAIN_WINDOW)
         .ok_or(tauri::Error::WindowNotFound)?;
     window.set_always_on_top(persisted.always_on_top)?;
-    let count = app
-        .state::<ShellState>()
-        .coordinator
-        .current_snapshots(unix_now())
-        .len();
     window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
         WIDGET_WIDTH,
-        height_for_layout(layout_for_count(count)),
+        INITIAL_WIDGET_HEIGHT,
     )))?;
     if let Some(saved) = persisted.window.clone() {
         let monitors = window
@@ -936,20 +926,8 @@ fn window_error() -> CommandError {
     }
 }
 
-fn layout_for_count(count: usize) -> Layout {
-    match count {
-        0 => Layout::Empty,
-        1 => Layout::Single,
-        _ => Layout::Dual,
-    }
-}
-
-pub fn height_for_layout(layout: Layout) -> f64 {
-    match layout {
-        Layout::Empty => 102.0,
-        Layout::Single => 178.0,
-        Layout::Dual => 254.0,
-    }
+pub fn clamp_widget_height(height: u32) -> f64 {
+    height.clamp(MIN_WIDGET_HEIGHT, MAX_WIDGET_HEIGHT).into()
 }
 
 pub fn clamp_position(

@@ -1,47 +1,47 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  createLayoutSynchronizer, formatCountdown, layoutForProviderCount, meterText, meterTone,
-  remainingPercent, visibleProviders
+  createHeightSynchronizer, formatCountdown, measuredWidgetHeight, meterText, meterTone,
+  providerWindowEntries, remainingPercent, visibleProviders
 } from "../../ui/ui-model.js";
 
-test("retries a failed layout until it is successfully committed", async () => {
+test("retries a failed measured height until it is successfully committed", async () => {
   const attempts = [];
   const committed = [];
   let shouldFail = true;
-  const layout = createLayoutSynchronizer(async (value) => {
+  const layout = createHeightSynchronizer(async (value) => {
     attempts.push(value);
     if (shouldFail) throw new Error("injected layout failure");
   }, (count) => committed.push(count));
 
-  await assert.rejects(layout.sync(1), /injected layout failure/);
+  await assert.rejects(layout.sync(187), /injected layout failure/);
   shouldFail = false;
-  await layout.sync(1);
-  await layout.sync(1);
+  await layout.sync(187);
+  await layout.sync(187);
 
-  assert.deepEqual(attempts, ["single", "single"]);
-  assert.deepEqual(committed, [1]);
+  assert.deepEqual(attempts, [187, 187]);
+  assert.deepEqual(committed, [187]);
 });
 
-test("coalesces pending layout calls and follows a changed desired count", async () => {
+test("coalesces pending height calls and follows a changed measurement", async () => {
   const attempts = [];
   const committed = [];
   let releaseFirst;
   const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
-  const layout = createLayoutSynchronizer(async (value) => {
+  const layout = createHeightSynchronizer(async (value) => {
     attempts.push(value);
     if (attempts.length === 1) await firstGate;
   }, (count) => committed.push(count));
 
-  const first = layout.sync(1);
-  const coalesced = layout.sync(2);
+  const first = layout.sync(187);
+  const coalesced = layout.sync(263);
   assert.equal(first, coalesced);
   releaseFirst();
   await first;
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(attempts, ["single", "dual"]);
-  assert.deepEqual(committed, [1, 2]);
+  assert.deepEqual(attempts, [187, 263]);
+  assert.deepEqual(committed, [187, 263]);
 });
 
 test("renders the approved ten-cell block meter", () => {
@@ -69,9 +69,49 @@ test("hides incomplete and expired providers", () => {
   };
   assert.deepEqual(visibleProviders({providers: [complete]}, 100), [complete]);
   assert.deepEqual(visibleProviders({providers: [complete]}, 200), []);
-  assert.equal(layoutForProviderCount(0), "empty");
-  assert.equal(layoutForProviderCount(1), "single");
-  assert.equal(layoutForProviderCount(2), "dual");
+});
+
+test("shows an exact weekly-only provider and leaves the short window absent", () => {
+  const weeklyOnly = {
+    provider: "codex",
+    observed_at: 90,
+    weekly_window: {duration_minutes: 10080, used_percent: 35, resets_at: 300}
+  };
+
+  assert.deepEqual(visibleProviders({providers: [weeklyOnly]}, 100), [weeklyOnly]);
+  assert.equal(remainingPercent(weeklyOnly.weekly_window.used_percent), 65);
+  assert.deepEqual(providerWindowEntries(weeklyOnly), [
+    ["7D", weeklyOnly.weekly_window]
+  ]);
+});
+
+test("hides Claude unless both exact windows are present", () => {
+  const complete = {
+    provider: "claude",
+    observed_at: 90,
+    short_window: {duration_minutes: 300, used_percent: 10, resets_at: 200},
+    weekly_window: {duration_minutes: 10080, used_percent: 20, resets_at: 300}
+  };
+
+  assert.deepEqual(visibleProviders({providers: [complete]}, 100), [complete]);
+  assert.deepEqual(
+    visibleProviders({providers: [{...complete, short_window: null}]}, 100),
+    []
+  );
+  assert.deepEqual(
+    visibleProviders({providers: [{...complete, weekly_window: null}]}, 100),
+    []
+  );
+});
+
+test("measures the rendered body height with a rounding safety pixel", () => {
+  const body = {
+    scrollHeight: 188,
+    getBoundingClientRect: () => ({height: 188.2})
+  };
+
+  assert.equal(measuredWidgetHeight(body), 190);
+  assert.equal(measuredWidgetHeight(null), null);
 });
 
 test("fails closed for malformed provider views and fields", () => {

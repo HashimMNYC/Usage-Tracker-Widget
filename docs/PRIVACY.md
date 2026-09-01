@@ -10,7 +10,7 @@ The state file is `%LOCALAPPDATA%\UsageWidget\state.json`. It contains only thes
 - `snapshots`, keyed by `codex` or `claude`, where each snapshot contains:
   - the fixed provider identifier;
   - `observed_at`, as a UTC epoch second;
-  - `short_window` and `weekly_window`, each containing only `duration_minutes`, `used_percent`, and `resets_at`;
+  - optional `short_window` and `weekly_window` values, each containing only `duration_minutes`, `used_percent`, and `resets_at` when that exact window is present;
 - `window`, containing only the last `x` and `y` screen coordinates, or `null`;
 - `always_on_top`;
 - `launch_at_signin_requested`;
@@ -23,7 +23,7 @@ The state file does **not** contain raw provider records, prompts, responses, tr
 
 ## Local reads
 
-For Codex, the app reads only `.jsonl` candidates below the configured local `sessions` and `archived_sessions` roots. It bounds the number of candidates, tail bytes, and record bytes before parsing. It extracts only the normalized numeric fields listed above. Source paths and record content are not returned to the frontend or persisted.
+For Codex, the app reads only `.jsonl` candidates below the configured local `sessions` and `archived_sessions` roots. It bounds the number of candidates, tail bytes, and record bytes before parsing. It accepts the general `codex` limit, rejects named model-specific limits, and extracts only the normalized numeric fields listed above. Source paths and record content are not returned to the frontend or persisted.
 
 For Claude capture, standard input is size-bounded. The app allowlists the five-hour and seven-day used percentages and reset timestamps, assigns the two known durations, validates the complete snapshot, and discards the raw input. Invalid input prints only a fixed status message and does not update a provider snapshot.
 

@@ -34,19 +34,12 @@ export function visibleProviders(view, nowSeconds) {
     if (!isRecord(item) || !candidates.has(item.provider) || !isFiniteNumber(item.observed_at)) continue;
     const shortWindow = item.short_window;
     const weeklyWindow = item.weekly_window;
-    if (!isRecord(shortWindow) || !isRecord(weeklyWindow)) continue;
-    if (
-      shortWindow.duration_minutes !== 300 ||
-      weeklyWindow.duration_minutes !== 10080 ||
-      !isFiniteNumber(shortWindow.resets_at) ||
-      !isFiniteNumber(weeklyWindow.resets_at) ||
-      shortWindow.resets_at <= nowSeconds ||
-      weeklyWindow.resets_at <= nowSeconds ||
-      !isFiniteNumber(shortWindow.used_percent) ||
-      !isFiniteNumber(weeklyWindow.used_percent) ||
-      shortWindow.used_percent < 0 || shortWindow.used_percent > 100 ||
-      weeklyWindow.used_percent < 0 || weeklyWindow.used_percent > 100
-    ) continue;
+    const shortMissing = shortWindow === undefined || shortWindow === null;
+    const weeklyMissing = weeklyWindow === undefined || weeklyWindow === null;
+    if (shortMissing && weeklyMissing) continue;
+    if (item.provider === "claude" && (shortMissing || weeklyMissing)) continue;
+    if (!shortMissing && !isValidWindow(shortWindow, 300, nowSeconds)) continue;
+    if (!weeklyMissing && !isValidWindow(weeklyWindow, 10080, nowSeconds)) continue;
     candidates.get(item.provider).push(item);
   }
 
@@ -56,26 +49,47 @@ export function visibleProviders(view, nowSeconds) {
   });
 }
 
-export const layoutForProviderCount = (count) => count === 0 ? "empty" : count === 1 ? "single" : "dual";
+function isValidWindow(window, expectedDuration, nowSeconds) {
+  return isRecord(window) &&
+    window.duration_minutes === expectedDuration &&
+    isFiniteNumber(window.resets_at) &&
+    window.resets_at > nowSeconds &&
+    isFiniteNumber(window.used_percent) &&
+    window.used_percent >= 0 && window.used_percent <= 100;
+}
 
-export function createLayoutSynchronizer(setLayout, commit) {
-  let committedCount = -1;
-  let desiredCount = -1;
+export function providerWindowEntries(provider) {
+  const entries = [];
+  if (provider?.short_window != null) entries.push(["5H", provider.short_window]);
+  if (provider?.weekly_window != null) entries.push(["7D", provider.weekly_window]);
+  return entries;
+}
+
+export function measuredWidgetHeight(body) {
+  if (!body || typeof body.getBoundingClientRect !== "function") return null;
+  const rectHeight = body.getBoundingClientRect().height;
+  if (!isFiniteNumber(rectHeight) || rectHeight < 0) return null;
+  return Math.ceil(rectHeight) + 1;
+}
+
+export function createHeightSynchronizer(setHeight, commit) {
+  let committedHeight = -1;
+  let desiredHeight = -1;
   let pending = null;
 
   const start = () => {
-    const attempt = desiredCount;
+    const attempt = desiredHeight;
     let succeeded = false;
     pending = Promise.resolve()
-      .then(() => setLayout(layoutForProviderCount(attempt)))
+      .then(() => setHeight(attempt))
       .then(() => {
-        committedCount = attempt;
+        committedHeight = attempt;
         commit(attempt);
         succeeded = true;
       })
       .finally(() => {
         pending = null;
-        if (succeeded && desiredCount !== committedCount) {
+        if (succeeded && desiredHeight !== committedHeight) {
           void start().catch(() => {});
         }
       });
@@ -83,10 +97,10 @@ export function createLayoutSynchronizer(setLayout, commit) {
   };
 
   return {
-    sync(count) {
-      desiredCount = count;
+    sync(height) {
+      desiredHeight = height;
       if (pending) return pending;
-      if (desiredCount === committedCount) return Promise.resolve();
+      if (desiredHeight === committedHeight) return Promise.resolve();
       return start();
     }
   };

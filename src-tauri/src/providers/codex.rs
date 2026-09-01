@@ -59,6 +59,7 @@ pub struct CollectResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtractError {
     MissingRateLimits,
+    NonGeneralLimit,
     MissingWindow,
     AmbiguousWindow,
     InvalidField,
@@ -143,12 +144,21 @@ pub fn extract_codex_snapshot(
         .as_object()
         .ok_or(ExtractError::InvalidField)?;
 
+    let general_limit = match rate_limits.get("limit_id") {
+        None => false,
+        Some(limit_id) if limit_id.as_str() == Some("codex") => true,
+        Some(_) => return Err(ExtractError::NonGeneralLimit),
+    };
+
     let mut short_windows = Vec::new();
     let mut weekly_windows = Vec::new();
     for name in ["primary", "secondary"] {
         let Some(value) = rate_limits.get(name) else {
             continue;
         };
+        if value.is_null() {
+            continue;
+        }
         let window = parse_window(value)?;
         match window.duration_minutes {
             SHORT_WINDOW_MINUTES => short_windows.push(window),
@@ -160,7 +170,9 @@ pub fn extract_codex_snapshot(
     if short_windows.len() > 1 || weekly_windows.len() > 1 {
         return Err(ExtractError::AmbiguousWindow);
     }
-    if short_windows.len() != 1 || weekly_windows.len() != 1 {
+    if short_windows.is_empty() && weekly_windows.is_empty()
+        || (!general_limit && (short_windows.is_empty() || weekly_windows.is_empty()))
+    {
         return Err(ExtractError::MissingWindow);
     }
 
@@ -171,8 +183,8 @@ pub fn extract_codex_snapshot(
     let snapshot = ProviderSnapshot {
         provider: ProviderId::Codex,
         observed_at,
-        short_window: short_windows.pop().expect("length checked"),
-        weekly_window: weekly_windows.pop().expect("length checked"),
+        short_window: short_windows.pop(),
+        weekly_window: weekly_windows.pop(),
     };
     snapshot.validate(now).map_err(|error| match error {
         ValidationError::ExpiredReset => ExtractError::Expired,
@@ -344,9 +356,9 @@ fn normalize_epoch(value: i64) -> Option<i64> {
 
 fn diagnostic_for_extract(error: ExtractError) -> DiagnosticCode {
     match error {
-        ExtractError::MissingRateLimits | ExtractError::MissingWindow => {
-            DiagnosticCode::NoExactLimits
-        }
+        ExtractError::MissingRateLimits
+        | ExtractError::MissingWindow
+        | ExtractError::NonGeneralLimit => DiagnosticCode::NoExactLimits,
         ExtractError::AmbiguousWindow => DiagnosticCode::AmbiguousWindow,
         ExtractError::InvalidField => DiagnosticCode::InvalidSchema,
         ExtractError::Expired => DiagnosticCode::ExpiredSnapshot,

@@ -1,12 +1,12 @@
 # Usage Widget Design
 
-Status: approved in chat on 2026-08-31. Implementation has not started.
+Status: approved in chat on 2026-08-31 and implemented in this repository.
 
 ## Purpose
 
 Build a compact Windows 11 desktop widget that shows the exact remaining Claude Code and Codex subscription limits available from local CLI data. The widget is a portable x64 executable with no installer and no network access.
 
-The product favors honesty over coverage: a provider is shown only when both its short and weekly windows have validated percentages and reset timestamps. It never estimates a subscription percentage from token counts.
+The product favors honesty over coverage: every displayed window has a validated percentage and reset timestamp. A locally reported general Codex limit may expose only one exact window, in which case the missing row is hidden; Claude still requires both status-line windows. The widget never substitutes a named model-specific quota or estimates a subscription percentage from token counts.
 
 ## Product decisions
 
@@ -14,7 +14,7 @@ The product favors honesty over coverage: a provider is shown only when both its
 - Runtime: Tauri 2 with a Rust backend and embedded vanilla HTML, CSS, and JavaScript.
 - Distribution: one portable `usage-widget.exe`, without an installer.
 - Data boundary: local files and Claude Code status-line input only.
-- Display: percentage remaining and reset countdown for five-hour and seven-day windows.
+- Display: percentage remaining and reset countdown for each exact five-hour or seven-day window currently available.
 - Visual style: compact ASCII interface with ten-cell, 8-bit meters.
 - Lifecycle: frameless, draggable, always on top by default, and resident in the Windows notification area.
 - Close behavior: the window hides; only the tray menu's Quit action exits the process.
@@ -44,7 +44,7 @@ Claude status-line JSON -------/           |
 The application has four isolated units:
 
 1. **Provider adapters** read one provider-specific source and return a normalized candidate snapshot. They do not know about the UI.
-2. **Validation and state** accepts only complete, current snapshots and atomically persists the minimum required fields.
+2. **Validation and state** accepts only current snapshots with at least one exact window and atomically persists the minimum required fields. Provider-specific adapters may impose stricter completeness rules.
 3. **Tauri application shell** owns the single-instance lifecycle, window, tray, startup registration, and narrow commands exposed to the frontend.
 4. **Presentation** renders normalized values and updates countdown text. It cannot read arbitrary files, launch a shell, or make network requests.
 
@@ -58,11 +58,11 @@ Each visible provider has exactly this logical shape:
 ProviderSnapshot
   provider: "codex" | "claude"
   observed_at: UTC epoch seconds
-  short_window:
+  short_window: optional
     duration_minutes: 300
     used_percent: number from 0 through 100
     resets_at: future UTC epoch seconds
-  weekly_window:
+  weekly_window: optional
     duration_minutes: 10080
     used_percent: number from 0 through 100
     resets_at: future UTC epoch seconds
@@ -70,17 +70,17 @@ ProviderSnapshot
 
 `remaining_percent` is derived at the presentation boundary as `clamp(100 - used_percent, 0, 100)`. It is not independently stored.
 
-A snapshot is rejected unless both windows are present, all numeric values are finite, percentages are in range, durations identify the expected windows, and reset timestamps are in the future. Unknown keys are ignored. Rejected input never replaces the last valid snapshot.
+A snapshot is rejected unless at least one recognized window is present, all present numeric values are finite, percentages are in range, durations identify the expected windows, and reset timestamps are in the future. Unknown keys are ignored. Claude capture and legacy Codex records without a limit identifier remain stricter and require both windows. Rejected input never replaces the last valid snapshot.
 
-Once either stored reset timestamp expires, that provider is no longer current and is hidden until a new valid snapshot arrives. This prevents a stale pre-reset percentage from appearing current.
+Once any stored window expires, that provider snapshot is no longer current and is hidden until a new valid snapshot arrives. This prevents a stale pre-reset percentage from appearing current.
 
 ## Codex adapter
 
 The Codex adapter reads JSONL files under the current user's configured Codex home, defaulting to `%USERPROFILE%\.codex`, including `sessions` and `archived_sessions`.
 
-On startup it locates the most recently modified candidate files and searches newest records first for a complete `rate_limits` payload. During runtime it watches the relevant directories, debounces file-change events for 500 milliseconds, and refreshes only changed or newly created candidates. A 60-second fallback rescan and a manual Refresh tray action recover from missed filesystem events.
+On startup it locates the most recently modified candidate files and searches newest records first for a usable general `rate_limits` payload. During runtime it watches the relevant directories, debounces file-change events for 500 milliseconds, and refreshes only changed or newly created candidates. A 60-second fallback rescan and a manual Refresh tray action recover from missed filesystem events.
 
-The observed local schema is not treated as a stable provider contract. The current adapter recognizes `rate_limits.primary` and `rate_limits.secondary` plus semantic field variants for used percentage, window duration, and reset time. It classifies windows by duration rather than object order, tolerates partial final JSONL lines, and fails closed on `null`, malformed, ambiguous, or incomplete data.
+The observed local schema is not treated as a stable provider contract. The current adapter recognizes `rate_limits.primary` and `rate_limits.secondary` plus semantic field variants for used percentage, window duration, and reset time. It classifies windows by duration rather than object order, treats a null primary or secondary slot as an absent window, accepts a partial exact window set only when `limit_id` is exactly `codex`, rejects named model-specific limits, tolerates partial final JSONL lines, and fails closed on malformed present windows, null required fields, or ambiguous data. Legacy records without `limit_id` require both exact windows.
 
 The adapter never copies transcript text or exposes source paths to the frontend. Diagnostic messages report categories such as `no files`, `no exact limits`, or `expired snapshot`, not record contents.
 
@@ -154,7 +154,7 @@ There are no animations, charts, token totals, settings window, provider placeho
 ## Error handling
 
 - Missing provider directories, access-denied files, partial writes, invalid JSON, unknown schemas, and expired snapshots are expected states, not crashes.
-- A provider stays hidden unless its adapter returns both exact windows.
+- A provider stays hidden unless its adapter returns at least one exact current window; unavailable rows are hidden rather than synthesized.
 - If both providers are hidden, the window displays only `NO CURRENT LIMIT DATA`.
 - A failed manual refresh leaves the last still-current snapshot in place.
 - A failed Claude settings edit or startup registration is reported without partial configuration; the previous file or registration remains intact.
@@ -217,8 +217,8 @@ Pure rendering and countdown functions are kept separate from Tauri calls and te
 The first release is accepted when:
 
 1. A portable `usage-widget.exe` runs on Windows 11 x64 without an installer.
-2. It shows exact remaining five-hour and seven-day values with reset countdowns from current local data.
-3. It never shows estimated, incomplete, or expired provider values.
+2. It shows every exact available five-hour or seven-day value with a reset countdown from current local data.
+3. It never shows estimated, model-substituted, malformed, or expired provider values.
 4. Claude tracking is explicit, reversible, settings-preserving, credential-free, and hidden until its first valid payload.
 5. The ASCII interface, tray lifecycle, always-on-top behavior, saved position, and optional startup behavior match this design.
 6. Automated tests pass and the packaged EXE completes the local smoke checks.
