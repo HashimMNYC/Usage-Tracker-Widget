@@ -1,6 +1,9 @@
 use std::{
     path::Path,
-    sync::{mpsc, Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, MutexGuard,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -154,9 +157,25 @@ impl ShellState {
     }
 }
 
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("GUI startup failed")]
-pub struct GuiStartError;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GuiStartError {
+    #[error("local state startup failed")]
+    LocalState,
+    #[error("WebView2 runtime startup failed")]
+    WebViewRuntime,
+    #[error("GUI startup failed")]
+    Runtime,
+}
+
+pub const fn gui_start_error_message(error: GuiStartError) -> &'static str {
+    match error {
+        GuiStartError::LocalState => "Usage Widget could not read or repair its local state.",
+        GuiStartError::WebViewRuntime => {
+            "Usage Widget could not start. Check that Windows WebView2 Runtime is available."
+        }
+        GuiStartError::Runtime => "Usage Widget could not start its Windows GUI.",
+    }
+}
 
 struct TauriStartupRegistration {
     app: AppHandle,
@@ -275,7 +294,7 @@ impl PositionSaver {
         let join = thread::Builder::new()
             .name("usage-widget-position".into())
             .spawn(move || position_worker(receiver, store))
-            .map_err(|_| GuiStartError)?;
+            .map_err(|_| GuiStartError::Runtime)?;
         Ok(Self {
             sender,
             join: Some(join),
@@ -373,20 +392,23 @@ pub fn set_widget_layout(app: AppHandle, layout: Layout) -> Result<(), CommandEr
 pub fn run_gui() -> Result<(), GuiStartError> {
     let now = unix_now();
     let store: Arc<dyn StateStore> = Arc::new(JsonStateStore::new(
-        default_state_path().map_err(|_| GuiStartError)?,
+        default_state_path().map_err(|_| GuiStartError::LocalState)?,
     ));
     let user_profile = std::env::var_os("USERPROFILE")
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(dirs::home_dir)
-        .ok_or(GuiStartError)?;
+        .ok_or(GuiStartError::Runtime)?;
     let roots = resolve_codex_roots(std::env::var_os("CODEX_HOME").as_deref(), &user_profile);
     let coordinator = Arc::new(
         CollectionCoordinator::load(Arc::new(CodexCollector::new(roots)), store.clone(), now)
-            .map_err(|_| GuiStartError)?,
+            .map_err(|_| GuiStartError::LocalState)?,
     );
-    let claude_settings =
-        ClaudeSettingsManager::from_environment(store.clone()).map_err(|_| GuiStartError)?;
+    let claude_settings = ClaudeSettingsManager::from_environment(store.clone())
+        .map_err(|_| GuiStartError::Runtime)?;
+    tauri::webview_version().map_err(|_| GuiStartError::WebViewRuntime)?;
+    let local_state_setup_failure = Arc::new(AtomicBool::new(false));
+    let setup_failure_flag = local_state_setup_failure.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -407,8 +429,12 @@ pub fn run_gui() -> Result<(), GuiStartError> {
         ])
         .setup(move |app| {
             let _ = coordinator.refresh_now(unix_now());
-            let persisted = store.load(unix_now()).map_err(|_| GuiStartError)?;
-            let supervisor = start_supervisor(coordinator.clone()).map_err(|_| GuiStartError)?;
+            let persisted = store.load(unix_now()).map_err(|_| {
+                setup_failure_flag.store(true, Ordering::Relaxed);
+                GuiStartError::LocalState
+            })?;
+            let supervisor =
+                start_supervisor(coordinator.clone()).map_err(|_| GuiStartError::Runtime)?;
             let position_saver = PositionSaver::start(store.clone())?;
             let startup: Arc<dyn StartupRegistration> = Arc::new(TauriStartupRegistration {
                 app: app.handle().clone(),
@@ -430,7 +456,13 @@ pub fn run_gui() -> Result<(), GuiStartError> {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .map_err(|_| GuiStartError)
+        .map_err(|_| {
+            if local_state_setup_failure.load(Ordering::Relaxed) {
+                GuiStartError::LocalState
+            } else {
+                GuiStartError::Runtime
+            }
+        })
 }
 
 fn configure_main_window(app: &AppHandle, persisted: &PersistedState) -> tauri::Result<()> {

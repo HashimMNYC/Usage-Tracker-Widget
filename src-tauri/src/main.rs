@@ -1,8 +1,10 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use usage_widget::{
     providers::claude::{capture_mode_from_args, run_claude_capture},
-    shell::run_gui,
+    shell::{gui_start_error_message, run_gui, GuiStartError},
     state_store::{default_state_path, JsonStateStore},
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
@@ -30,14 +32,14 @@ fn main() {
         std::process::exit(exit);
     }
 
-    if run_gui().is_err() {
-        show_gui_start_error();
+    if let Err(error) = run_gui() {
+        show_gui_start_error(error);
         std::process::exit(1);
     }
 }
 
-fn show_gui_start_error() {
-    let message = "Usage Widget could not start. Windows WebView2 Runtime is required."
+fn show_gui_start_error(error: GuiStartError) {
+    let message = gui_start_error_message(error)
         .encode_utf16()
         .chain(Some(0))
         .collect::<Vec<_>>();

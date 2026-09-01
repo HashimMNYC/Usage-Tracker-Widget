@@ -1,11 +1,14 @@
 import { getWidgetView, hideWidget, refresh, setWidgetLayout } from "./bridge.js";
 import { renderProviders, updateCountdowns } from "./render.js";
-import { createLatestOnlyRefresh, layoutForProviderCount, visibleProviders } from "./ui-model.js";
+import { createLatestOnlyRefresh, createLayoutSynchronizer, visibleProviders } from "./ui-model.js";
 
 const providersElement = document.querySelector("#providers");
 const hideButton = document.querySelector("#hide-widget");
 let currentView = {providers: []};
 let visibleCount = -1;
+const layoutSynchronizer = createLayoutSynchronizer(setWidgetLayout, (count) => {
+  visibleCount = count;
+});
 
 function currentProviders() {
   return visibleProviders(currentView, Date.now() / 1000);
@@ -23,8 +26,7 @@ function renderCurrentView(forceRender = false) {
   }
 
   if (nextCount !== visibleCount) {
-    visibleCount = nextCount;
-    void setWidgetLayout(layoutForProviderCount(nextCount)).catch(() => {});
+    void layoutSynchronizer.sync(nextCount).catch(() => {});
   }
 }
 

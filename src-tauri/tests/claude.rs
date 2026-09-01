@@ -16,7 +16,10 @@ use usage_widget::{
         capture_mode_from_args, parse_claude_statusline, render_capture_status, run_claude_capture,
         CaptureError, MAX_CLAUDE_STDIN_BYTES,
     },
-    state_store::{ClaudeTrackingIdentity, PersistedState, StateError, StateMutation, StateStore},
+    state_store::{
+        ClaudeTrackingIdentity, JsonStateStore, PersistedState, StateError, StateMutation,
+        StateStore,
+    },
 };
 
 const NOW: i64 = 2_000_000_000;
@@ -271,6 +274,47 @@ fn valid_capture_persists_normalized_snapshot_before_printing() {
     let stored = &store.snapshot().snapshots[&ProviderId::Claude];
     assert_eq!(stored.short_window.used_percent, 23.0);
     assert_eq!(stored.weekly_window.used_percent, 41.0);
+}
+
+#[test]
+fn valid_capture_recovers_from_structurally_corrupt_current_state() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let original = br#"{"schema_version":1,"snapshots":"invalid"}"#;
+    fs::write(&path, original).unwrap();
+    let store = JsonStateStore::new(path.clone());
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let exit = run_claude_capture(
+        exact_input().to_string().as_bytes(),
+        &mut stdout,
+        &mut stderr,
+        &store,
+        NOW,
+    );
+
+    assert_eq!(exit, 0);
+    assert_eq!(stdout, b"USAGE 5H 77% LEFT | 7D 59% LEFT\n");
+    assert!(stderr.is_empty());
+    assert_eq!(
+        store.load(NOW).unwrap().snapshots[&ProviderId::Claude]
+            .short_window
+            .used_percent,
+        23.0
+    );
+    let quarantined = fs::read_dir(temp.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|candidate| {
+            candidate
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("state.corrupt.")
+        })
+        .unwrap();
+    assert_eq!(fs::read(quarantined).unwrap(), original);
 }
 
 #[test]

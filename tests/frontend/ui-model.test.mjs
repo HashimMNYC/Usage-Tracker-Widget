@@ -1,9 +1,48 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  formatCountdown, layoutForProviderCount, meterText, meterTone,
+  createLayoutSynchronizer, formatCountdown, layoutForProviderCount, meterText, meterTone,
   remainingPercent, visibleProviders
 } from "../../ui/ui-model.js";
+
+test("retries a failed layout until it is successfully committed", async () => {
+  const attempts = [];
+  const committed = [];
+  let shouldFail = true;
+  const layout = createLayoutSynchronizer(async (value) => {
+    attempts.push(value);
+    if (shouldFail) throw new Error("injected layout failure");
+  }, (count) => committed.push(count));
+
+  await assert.rejects(layout.sync(1), /injected layout failure/);
+  shouldFail = false;
+  await layout.sync(1);
+  await layout.sync(1);
+
+  assert.deepEqual(attempts, ["single", "single"]);
+  assert.deepEqual(committed, [1]);
+});
+
+test("coalesces pending layout calls and follows a changed desired count", async () => {
+  const attempts = [];
+  const committed = [];
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const layout = createLayoutSynchronizer(async (value) => {
+    attempts.push(value);
+    if (attempts.length === 1) await firstGate;
+  }, (count) => committed.push(count));
+
+  const first = layout.sync(1);
+  const coalesced = layout.sync(2);
+  assert.equal(first, coalesced);
+  releaseFirst();
+  await first;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(attempts, ["single", "dual"]);
+  assert.deepEqual(committed, [1, 2]);
+});
 
 test("renders the approved ten-cell block meter", () => {
   assert.equal(remainingPercent(38.4), 62);

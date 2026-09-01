@@ -225,19 +225,25 @@ impl JsonStateStore {
                 return Ok(PersistedState::default());
             }
         };
-        let schema_version = value
-            .get("schema_version")
-            .and_then(Value::as_u64)
-            .ok_or(StateError::Invalid)?;
+        let Some(schema_version) = value.get("schema_version").and_then(Value::as_u64) else {
+            self.quarantine_corrupt()?;
+            return Ok(PersistedState::default());
+        };
         if schema_version != u64::from(STATE_SCHEMA_VERSION) {
             return Err(StateError::UnsupportedSchema);
         }
-        let state: PersistedState =
-            serde_json::from_value(value).map_err(|_| StateError::Invalid)?;
+        let state: PersistedState = match serde_json::from_value(value) {
+            Ok(state) => state,
+            Err(_) => {
+                self.quarantine_corrupt()?;
+                return Ok(PersistedState::default());
+            }
+        };
         if state.snapshots.iter().any(|(provider, snapshot)| {
             *provider != snapshot.provider || snapshot.validate(snapshot.observed_at).is_err()
         }) {
-            return Err(StateError::Invalid);
+            self.quarantine_corrupt()?;
+            return Ok(PersistedState::default());
         }
         Ok(state)
     }

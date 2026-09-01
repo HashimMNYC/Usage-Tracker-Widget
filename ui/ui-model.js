@@ -58,6 +58,40 @@ export function visibleProviders(view, nowSeconds) {
 
 export const layoutForProviderCount = (count) => count === 0 ? "empty" : count === 1 ? "single" : "dual";
 
+export function createLayoutSynchronizer(setLayout, commit) {
+  let committedCount = -1;
+  let desiredCount = -1;
+  let pending = null;
+
+  const start = () => {
+    const attempt = desiredCount;
+    let succeeded = false;
+    pending = Promise.resolve()
+      .then(() => setLayout(layoutForProviderCount(attempt)))
+      .then(() => {
+        committedCount = attempt;
+        commit(attempt);
+        succeeded = true;
+      })
+      .finally(() => {
+        pending = null;
+        if (succeeded && desiredCount !== committedCount) {
+          void start().catch(() => {});
+        }
+      });
+    return pending;
+  };
+
+  return {
+    sync(count) {
+      desiredCount = count;
+      if (pending) return pending;
+      if (desiredCount === committedCount) return Promise.resolve();
+      return start();
+    }
+  };
+}
+
 export function createLatestOnlyRefresh(request, commit) {
   let pending = false;
   let refreshQueued = false;

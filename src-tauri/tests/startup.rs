@@ -7,10 +7,10 @@ use usage_widget::{
     claude_settings::ClaudeTrackingState,
     providers::claude::capture_mode_from_args,
     shell::{
-        clamp_position, claude_tray_action, claude_tray_label, height_for_layout,
-        startup_tray_action, startup_tray_action_state, IntegrationStatus, Layout, TrayActionState,
-        TrayIntegrationAction, WorkArea, ALWAYS_ON_TOP_LABEL, REFRESH_LABEL, SHOW_HIDE_LABEL,
-        STARTUP_MANUAL_REVIEW_MESSAGE,
+        clamp_position, claude_tray_action, claude_tray_label, gui_start_error_message,
+        height_for_layout, startup_tray_action, startup_tray_action_state, GuiStartError,
+        IntegrationStatus, Layout, TrayActionState, TrayIntegrationAction, WorkArea,
+        ALWAYS_ON_TOP_LABEL, REFRESH_LABEL, SHOW_HIDE_LABEL, STARTUP_MANUAL_REVIEW_MESSAGE,
     },
     startup::{
         disable_startup, enable_startup, repair_startup, startup_status, StartupError,
@@ -22,6 +22,22 @@ use usage_widget::{
 };
 
 const NOW: i64 = 2_000_000_000;
+
+#[test]
+fn gui_start_errors_have_fixed_path_free_messages_by_failure_class() {
+    assert_eq!(
+        gui_start_error_message(GuiStartError::LocalState),
+        "Usage Widget could not read or repair its local state."
+    );
+    assert_eq!(
+        gui_start_error_message(GuiStartError::WebViewRuntime),
+        "Usage Widget could not start. Check that Windows WebView2 Runtime is available."
+    );
+    assert_eq!(
+        gui_start_error_message(GuiStartError::Runtime),
+        "Usage Widget could not start its Windows GUI."
+    );
+}
 
 #[test]
 fn tray_labels_match_the_approved_text_exactly() {

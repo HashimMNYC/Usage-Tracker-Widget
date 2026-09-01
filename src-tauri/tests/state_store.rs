@@ -192,6 +192,72 @@ fn malformed_json_is_quarantined_collision_resistently_and_defaults_are_loaded()
     assert!(bodies.contains(&b"{second-invalid".to_vec()));
 }
 
+fn quarantined_state_files(directory: &Path) -> Vec<std::path::PathBuf> {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name.starts_with("state.corrupt.") && name.ends_with(".json")
+        })
+        .collect()
+}
+
+#[test]
+fn structurally_corrupt_current_schema_is_quarantined_and_defaults_are_loaded() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let original = br#"{"schema_version":1,"snapshots":[],"window":null,"always_on_top":true,"launch_at_signin_requested":false,"startup_identity":null,"claude_tracking":null}"#;
+    fs::write(&path, original).unwrap();
+
+    let loaded = JsonStateStore::new(path.clone()).load(NOW).unwrap();
+
+    assert_eq!(loaded, PersistedState::default());
+    assert!(!path.exists());
+    let quarantined = quarantined_state_files(temp.path());
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(fs::read(&quarantined[0]).unwrap(), original);
+}
+
+#[test]
+fn semantically_corrupt_current_schema_is_quarantined_and_defaults_are_loaded() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let mut state = PersistedState::default();
+    state.snapshots.insert(ProviderId::Codex, valid_snapshot());
+    let mut value = serde_json::to_value(state).unwrap();
+    value["snapshots"]["codex"]["short_window"]["used_percent"] = json!(101.0);
+    let original = serde_json::to_vec(&value).unwrap();
+    fs::write(&path, &original).unwrap();
+
+    let loaded = JsonStateStore::new(path.clone()).load(NOW).unwrap();
+
+    assert_eq!(loaded, PersistedState::default());
+    assert!(!path.exists());
+    let quarantined = quarantined_state_files(temp.path());
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(fs::read(&quarantined[0]).unwrap(), original);
+}
+
+#[test]
+fn apply_rebuilds_state_after_quarantining_current_schema_corruption() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("state.json");
+    let original = br#"{"schema_version":1,"snapshots":"invalid"}"#;
+    fs::write(&path, original).unwrap();
+    let store = JsonStateStore::new(path.clone());
+
+    let rebuilt = store
+        .apply(NOW, StateMutation::SetAlwaysOnTop(false))
+        .unwrap();
+
+    assert!(!rebuilt.always_on_top);
+    assert_eq!(store.load(NOW).unwrap(), rebuilt);
+    let quarantined = quarantined_state_files(temp.path());
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(fs::read(&quarantined[0]).unwrap(), original);
+}
+
 struct FailingReplace;
 
 impl AtomicReplace for FailingReplace {
@@ -485,11 +551,20 @@ fn defaults_match_schema_contract_and_unsupported_or_oversized_files_are_rejecte
     let path = temp.path().join("state.json");
     let mut unsupported = serde_json::to_value(PersistedState::default()).unwrap();
     unsupported["schema_version"] = json!(STATE_SCHEMA_VERSION + 1);
-    fs::write(&path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
+    let unsupported_bytes = serde_json::to_vec(&unsupported).unwrap();
+    fs::write(&path, &unsupported_bytes).unwrap();
     assert!(matches!(
         JsonStateStore::new(path.clone()).load(NOW),
         Err(StateError::UnsupportedSchema)
     ));
+    assert_eq!(fs::read(&path).unwrap(), unsupported_bytes);
+    assert!(quarantined_state_files(temp.path()).is_empty());
+    assert!(matches!(
+        JsonStateStore::new(path.clone()).apply(NOW, StateMutation::SetAlwaysOnTop(false)),
+        Err(StateError::UnsupportedSchema)
+    ));
+    assert_eq!(fs::read(&path).unwrap(), unsupported_bytes);
+    assert!(quarantined_state_files(temp.path()).is_empty());
 
     fs::write(&path, vec![b' '; 1024 * 1024 + 1]).unwrap();
     assert!(matches!(
