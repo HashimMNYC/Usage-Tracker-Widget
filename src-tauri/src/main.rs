@@ -33,9 +33,7 @@ fn main() {
     }
 
     if let Err(error) = run_gui() {
-        if let Some(message) = gui_start_error_message(error) {
-            show_gui_start_error(message);
-        }
+        show_gui_start_error(gui_start_error_message(error));
         std::process::exit(1);
     }
 }

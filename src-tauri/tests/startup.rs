@@ -7,9 +7,9 @@ use usage_widget::{
     claude_settings::ClaudeTrackingState,
     providers::claude::capture_mode_from_args,
     shell::{
-        clamp_position, claude_tray_action, claude_tray_label, gui_start_error_message,
-        height_for_layout, startup_tray_action, startup_tray_action_state, GuiStartError,
-        IntegrationStatus, Layout, TrayActionState, TrayIntegrationAction, WorkArea,
+        clamp_position, claude_tray_action, claude_tray_label, finish_gui_setup,
+        gui_start_error_message, height_for_layout, startup_tray_action, startup_tray_action_state,
+        GuiStartError, IntegrationStatus, Layout, TrayActionState, TrayIntegrationAction, WorkArea,
         ALWAYS_ON_TOP_LABEL, REFRESH_LABEL, SHOW_HIDE_LABEL, STARTUP_MANUAL_REVIEW_MESSAGE,
     },
     startup::{
@@ -24,23 +24,40 @@ use usage_widget::{
 const NOW: i64 = 2_000_000_000;
 
 #[test]
-fn gui_start_errors_have_fixed_path_free_messages_by_failure_class() {
-    assert_eq!(
-        gui_start_error_message(GuiStartError::LocalState),
-        Some("Usage Widget could not read or repair its local state.")
-    );
-    assert_eq!(
-        gui_start_error_message(GuiStartError::WebViewRuntime),
-        Some("Usage Widget could not start. Check that Windows WebView2 Runtime is available.")
-    );
-    assert_eq!(
-        gui_start_error_message(GuiStartError::Runtime),
-        Some("Usage Widget could not start its Windows GUI.")
-    );
-    assert_eq!(
-        gui_start_error_message(GuiStartError::AlreadyReported),
-        None
-    );
+fn gui_setup_boundary_always_returns_ok_and_requests_one_fixed_report_and_exit() {
+    for (error, expected_message) in [
+        (
+            GuiStartError::LocalState,
+            "Usage Widget could not read or repair its local state.",
+        ),
+        (
+            GuiStartError::WebViewRuntime,
+            "Usage Widget could not start. Check that Windows WebView2 Runtime is available.",
+        ),
+        (
+            GuiStartError::Runtime,
+            "Usage Widget could not start its Windows GUI.",
+        ),
+        (
+            GuiStartError::Tray,
+            "Usage Widget could not complete that tray action.",
+        ),
+    ] {
+        let mut requests = Vec::new();
+        let result = finish_gui_setup(Err(error), |reported| {
+            requests.push((gui_start_error_message(reported), 1));
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(requests, vec![(expected_message, 1)]);
+    }
+
+    let mut requests = Vec::new();
+    let result = finish_gui_setup(Ok(()), |reported| {
+        requests.push((gui_start_error_message(reported), 1));
+    });
+    assert!(result.is_ok());
+    assert!(requests.is_empty());
 }
 
 #[test]
