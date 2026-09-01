@@ -1,9 +1,6 @@
 use std::{
     path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex, MutexGuard,
-    },
+    sync::{mpsc, Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -165,15 +162,18 @@ pub enum GuiStartError {
     WebViewRuntime,
     #[error("GUI startup failed")]
     Runtime,
+    #[error("GUI startup failure was already reported")]
+    AlreadyReported,
 }
 
-pub const fn gui_start_error_message(error: GuiStartError) -> &'static str {
+pub const fn gui_start_error_message(error: GuiStartError) -> Option<&'static str> {
     match error {
-        GuiStartError::LocalState => "Usage Widget could not read or repair its local state.",
+        GuiStartError::LocalState => Some("Usage Widget could not read or repair its local state."),
         GuiStartError::WebViewRuntime => {
-            "Usage Widget could not start. Check that Windows WebView2 Runtime is available."
+            Some("Usage Widget could not start. Check that Windows WebView2 Runtime is available.")
         }
-        GuiStartError::Runtime => "Usage Widget could not start its Windows GUI.",
+        GuiStartError::Runtime => Some("Usage Widget could not start its Windows GUI."),
+        GuiStartError::AlreadyReported => None,
     }
 }
 
@@ -407,8 +407,8 @@ pub fn run_gui() -> Result<(), GuiStartError> {
     let claude_settings = ClaudeSettingsManager::from_environment(store.clone())
         .map_err(|_| GuiStartError::Runtime)?;
     tauri::webview_version().map_err(|_| GuiStartError::WebViewRuntime)?;
-    let local_state_setup_failure = Arc::new(AtomicBool::new(false));
-    let setup_failure_flag = local_state_setup_failure.clone();
+    let setup_error = Arc::new(Mutex::new(None));
+    let setup_error_flag = setup_error.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -430,7 +430,7 @@ pub fn run_gui() -> Result<(), GuiStartError> {
         .setup(move |app| {
             let _ = coordinator.refresh_now(unix_now());
             let persisted = store.load(unix_now()).map_err(|_| {
-                setup_failure_flag.store(true, Ordering::Relaxed);
+                *lock_unpoisoned(&setup_error_flag) = Some(GuiStartError::LocalState);
                 GuiStartError::LocalState
             })?;
             let supervisor =
@@ -448,20 +448,19 @@ pub fn run_gui() -> Result<(), GuiStartError> {
                 position_saver: Mutex::new(Some(position_saver)),
             });
 
-            if let Err(error) = build_tray(app.handle()) {
+            if build_tray(app.handle()).is_err() {
                 show_tray_error(app.handle(), TRAY_ERROR_MESSAGE);
-                return Err(error.into());
+                *lock_unpoisoned(&setup_error_flag) = Some(GuiStartError::AlreadyReported);
+                return Err(GuiStartError::AlreadyReported.into());
             }
             configure_main_window(app.handle(), &persisted)?;
             Ok(())
         })
         .run(tauri::generate_context!())
         .map_err(|_| {
-            if local_state_setup_failure.load(Ordering::Relaxed) {
-                GuiStartError::LocalState
-            } else {
-                GuiStartError::Runtime
-            }
+            lock_unpoisoned(&setup_error)
+                .take()
+                .unwrap_or(GuiStartError::Runtime)
         })
 }
 

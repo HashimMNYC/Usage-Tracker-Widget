@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use usage_widget::{
     providers::claude::{capture_mode_from_args, run_claude_capture},
-    shell::{gui_start_error_message, run_gui, GuiStartError},
+    shell::{gui_start_error_message, run_gui},
     state_store::{default_state_path, JsonStateStore},
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
@@ -33,16 +33,15 @@ fn main() {
     }
 
     if let Err(error) = run_gui() {
-        show_gui_start_error(error);
+        if let Some(message) = gui_start_error_message(error) {
+            show_gui_start_error(message);
+        }
         std::process::exit(1);
     }
 }
 
-fn show_gui_start_error(error: GuiStartError) {
-    let message = gui_start_error_message(error)
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+fn show_gui_start_error(message: &str) {
+    let message = message.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let title = "Usage Widget"
         .encode_utf16()
         .chain(Some(0))

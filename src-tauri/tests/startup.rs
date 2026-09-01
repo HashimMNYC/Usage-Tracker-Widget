@@ -27,15 +27,19 @@ const NOW: i64 = 2_000_000_000;
 fn gui_start_errors_have_fixed_path_free_messages_by_failure_class() {
     assert_eq!(
         gui_start_error_message(GuiStartError::LocalState),
-        "Usage Widget could not read or repair its local state."
+        Some("Usage Widget could not read or repair its local state.")
     );
     assert_eq!(
         gui_start_error_message(GuiStartError::WebViewRuntime),
-        "Usage Widget could not start. Check that Windows WebView2 Runtime is available."
+        Some("Usage Widget could not start. Check that Windows WebView2 Runtime is available.")
     );
     assert_eq!(
         gui_start_error_message(GuiStartError::Runtime),
-        "Usage Widget could not start its Windows GUI."
+        Some("Usage Widget could not start its Windows GUI.")
+    );
+    assert_eq!(
+        gui_start_error_message(GuiStartError::AlreadyReported),
+        None
     );
 }
 

@@ -29,7 +29,7 @@ After the no-bundle build and again after copying the handoff executable, verify
 .\scripts\check-portable-exe.ps1 -Path .\release\usage-widget.exe
 ```
 
-Each command must report `PE_MACHINE=0x8664`, `PE_SUBSYSTEM=2`, and `PORTABLE_EXE_CHECK=PASS` with exit code 0. This behavioral artifact check does not infer the subsystem from source text.
+Each command must report `PE_MACHINE=0x8664`, `PE_SUBSYSTEM=2`, and `PORTABLE_EXE_CHECK=PASS` with exit code 0. The checker bounds the complete PE/COFF and PE32+ optional headers, including the declared data-directory extent, before enforcing AMD64 and Windows GUI. This behavioral artifact check does not infer the subsystem from source text.
 
 ## Verify the checksum
 
