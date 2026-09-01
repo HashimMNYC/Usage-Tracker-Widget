@@ -75,6 +75,266 @@ function Select-ProcessTreeConnections {
     }
 }
 
+function New-InspectionAggregateException {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[System.Exception]]$Failures
+    )
+
+    [System.AggregateException]::new($Message, [System.Exception[]]$Failures.ToArray())
+}
+
+function Invoke-GuardedInspectionResource {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Operations
+    )
+
+    $resource = $null
+    $resourceCreated = $false
+    $result = @()
+    $failures = [System.Collections.Generic.List[System.Exception]]::new()
+    try {
+        try {
+            foreach ($requiredOperation in @('Create', 'Configure', 'Use', 'Dispose')) {
+                if ($Operations[$requiredOperation] -isnot [scriptblock]) {
+                    throw [System.InvalidOperationException]::new('Inspection resource operations are incomplete.')
+                }
+            }
+
+            $resource = & $Operations['Create']
+            if ($null -eq $resource) {
+                throw [System.InvalidOperationException]::new('The inspection resource is unavailable.')
+            }
+            $resourceCreated = $true
+            [void](& $Operations['Configure'] $resource)
+            $result = @(& $Operations['Use'] $resource)
+        }
+        catch {
+            $failures.Add($_.Exception)
+        }
+    }
+    finally {
+        if ($resourceCreated) {
+            try {
+                [void](& $Operations['Dispose'] $resource)
+            }
+            catch {
+                $failures.Add($_.Exception)
+            }
+        }
+    }
+
+    if ($failures.Count -ne 0) {
+        if ($failures.Count -eq 1) {
+            throw $failures[0]
+        }
+        throw (New-InspectionAggregateException `
+                -Message 'Inspection resource use and cleanup failed.' `
+                -Failures $failures)
+    }
+    $result
+}
+
+function Invoke-InspectionLifecycle {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Operations,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$TimeoutMilliseconds
+    )
+
+    $invocation = $null
+    $stopInvocation = $null
+    $timedOut = $false
+    $output = @()
+    $failures = [System.Collections.Generic.List[System.Exception]]::new()
+    try {
+        try {
+            foreach ($requiredOperation in @(
+                'BeginInvoke',
+                'WaitForInvocation',
+                'BeginStop',
+                'WaitForStop',
+                'StopSynchronously',
+                'EndStop',
+                'EndInvoke',
+                'CloseStopWaitHandle',
+                'CloseInvocationWaitHandle'
+            )) {
+                if ($Operations[$requiredOperation] -isnot [scriptblock]) {
+                    throw [System.InvalidOperationException]::new('Inspection lifecycle operations are incomplete.')
+                }
+            }
+
+            try {
+                $invocation = & $Operations['BeginInvoke']
+                if ($null -eq $invocation) {
+                    throw [System.InvalidOperationException]::new('Inspection invocation did not start.')
+                }
+            }
+            catch {
+                $failures.Add($_.Exception)
+            }
+
+            if ($null -ne $invocation) {
+                $invocationCompleted = $false
+                try {
+                    $invocationCompleted = [bool](& $Operations['WaitForInvocation'] `
+                            $invocation `
+                            $TimeoutMilliseconds)
+                }
+                catch {
+                    $failures.Add($_.Exception)
+                }
+
+                if ($invocationCompleted) {
+                    try {
+                        $output = @(& $Operations['EndInvoke'] $invocation $false)
+                    }
+                    catch {
+                        $failures.Add($_.Exception)
+                    }
+                }
+                else {
+                    $timedOut = $true
+                    $synchronousStopRequired = $false
+                    try {
+                        $stopInvocation = & $Operations['BeginStop']
+                        if ($null -eq $stopInvocation) {
+                            throw [System.InvalidOperationException]::new('Inspection stop did not start.')
+                        }
+                    }
+                    catch {
+                        $failures.Add($_.Exception)
+                        $synchronousStopRequired = $true
+                    }
+
+                    if ($null -ne $stopInvocation) {
+                        try {
+                            [void](& $Operations['WaitForStop'] $stopInvocation)
+                        }
+                        catch {
+                            $failures.Add($_.Exception)
+                            $synchronousStopRequired = $true
+                        }
+                        try {
+                            [void](& $Operations['EndStop'] $stopInvocation)
+                        }
+                        catch {
+                            $failures.Add($_.Exception)
+                            $synchronousStopRequired = $true
+                        }
+                    }
+
+                    if ($synchronousStopRequired) {
+                        try {
+                            [void](& $Operations['StopSynchronously'])
+                        }
+                        catch {
+                            $failures.Add($_.Exception)
+                        }
+                    }
+
+                    try {
+                        [void](& $Operations['EndInvoke'] $invocation $true)
+                    }
+                    catch {
+                        $failures.Add($_.Exception)
+                    }
+                }
+            }
+        }
+        catch {
+            $failures.Add($_.Exception)
+        }
+    }
+    finally {
+        if ($null -ne $stopInvocation) {
+            try {
+                [void](& $Operations['CloseStopWaitHandle'] $stopInvocation)
+            }
+            catch {
+                $failures.Add($_.Exception)
+            }
+        }
+        if ($null -ne $invocation) {
+            try {
+                [void](& $Operations['CloseInvocationWaitHandle'] $invocation)
+            }
+            catch {
+                $failures.Add($_.Exception)
+            }
+        }
+    }
+
+    if ($failures.Count -ne 0) {
+        throw (New-InspectionAggregateException `
+                -Message 'Inspection lifecycle or cleanup failed.' `
+                -Failures $failures)
+    }
+    if ($timedOut) {
+        throw [System.TimeoutException]::new('Inspection command timed out.')
+    }
+    $output
+}
+
+function New-PowerShellLifecycleOperations {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.PowerShell]$PowerShell
+    )
+
+    @{
+        BeginInvoke = { $PowerShell.BeginInvoke() }.GetNewClosure()
+        WaitForInvocation = {
+            param($AsyncResult, [int]$TimeoutMilliseconds)
+            $AsyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)
+        }
+        BeginStop = { $PowerShell.BeginStop($null, $null) }.GetNewClosure()
+        WaitForStop = {
+            param($AsyncResult)
+            [void]$AsyncResult.AsyncWaitHandle.WaitOne()
+        }
+        StopSynchronously = { $PowerShell.Stop() }.GetNewClosure()
+        EndStop = {
+            param($AsyncResult)
+            $PowerShell.EndStop($AsyncResult)
+        }.GetNewClosure()
+        EndInvoke = {
+            param($AsyncResult, [bool]$ExpectedStop)
+            try {
+                $result = @($PowerShell.EndInvoke($AsyncResult))
+            }
+            catch [System.Management.Automation.PipelineStoppedException] {
+                if (-not $ExpectedStop) {
+                    throw
+                }
+                return @()
+            }
+            if ($PowerShell.HadErrors -or $PowerShell.Streams.Error.Count -ne 0) {
+                throw [System.InvalidOperationException]::new('Inspection command failed.')
+            }
+            $result
+        }.GetNewClosure()
+        CloseStopWaitHandle = {
+            param($AsyncResult)
+            $AsyncResult.AsyncWaitHandle.Close()
+        }
+        CloseInvocationWaitHandle = {
+            param($AsyncResult)
+            $AsyncResult.AsyncWaitHandle.Close()
+        }
+    }
+}
+
 function Invoke-BoundedInspection {
     [CmdletBinding()]
     param(
@@ -84,94 +344,47 @@ function Invoke-BoundedInspection {
 
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, [int]::MaxValue)]
-        [int]$TimeoutMilliseconds,
-
-        [scriptblock]$PipelineFactory
+        [int]$TimeoutMilliseconds
     )
 
-    if ($null -ne $PipelineFactory) {
-        $powerShell = & $PipelineFactory
+    $resourceOperations = @{
+        Create = { [System.Management.Automation.PowerShell]::Create() }
+        Configure = {
+            param($PowerShell)
+            if ($PowerShell -isnot [System.Management.Automation.PowerShell]) {
+                throw [System.InvalidOperationException]::new('The inspection pipeline is unavailable.')
+            }
+            $errorAction = [System.Management.Automation.ActionPreference]::Stop
+            switch ($InspectionKind) {
+                'ProcessSnapshot' {
+                    $operationTimeoutSeconds = [int][Math]::Max(
+                        1,
+                        [Math]::Ceiling($TimeoutMilliseconds / 1000.0)
+                    )
+                    [void]$PowerShell
+                        .AddCommand('Get-CimInstance')
+                        .AddParameter('ClassName', 'Win32_Process')
+                        .AddParameter('Property', @('ProcessId', 'ParentProcessId', 'CreationDate'))
+                        .AddParameter('OperationTimeoutSec', $operationTimeoutSeconds)
+                        .AddParameter('ErrorAction', $errorAction)
+                }
+                'TcpSnapshot' {
+                    [void]$PowerShell
+                        .AddCommand('Get-NetTCPConnection')
+                        .AddParameter('ErrorAction', $errorAction)
+                }
+            }
+        }.GetNewClosure()
+        Use = {
+            param($PowerShell)
+            $lifecycleOperations = New-PowerShellLifecycleOperations -PowerShell $PowerShell
+            Invoke-InspectionLifecycle `
+                -Operations $lifecycleOperations `
+                -TimeoutMilliseconds $TimeoutMilliseconds
+        }.GetNewClosure()
+        Dispose = { param($PowerShell) $PowerShell.Dispose() }
     }
-    else {
-        $powerShell = [System.Management.Automation.PowerShell]::Create()
-        $errorAction = [System.Management.Automation.ActionPreference]::Stop
-        switch ($InspectionKind) {
-            'ProcessSnapshot' {
-                $operationTimeoutSeconds = [int][Math]::Max(
-                    1,
-                    [Math]::Ceiling($TimeoutMilliseconds / 1000.0)
-                )
-                [void]$powerShell
-                    .AddCommand('Get-CimInstance')
-                    .AddParameter('ClassName', 'Win32_Process')
-                    .AddParameter('Property', @('ProcessId', 'ParentProcessId', 'CreationDate'))
-                    .AddParameter('OperationTimeoutSec', $operationTimeoutSeconds)
-                    .AddParameter('ErrorAction', $errorAction)
-            }
-            'TcpSnapshot' {
-                [void]$powerShell
-                    .AddCommand('Get-NetTCPConnection')
-                    .AddParameter('ErrorAction', $errorAction)
-            }
-        }
-    }
-    if ($powerShell -isnot [System.Management.Automation.PowerShell]) {
-        throw [System.InvalidOperationException]::new('The inspection pipeline is unavailable.')
-    }
-
-    $invocation = $null
-    $stopInvocation = $null
-    $invocationEnded = $false
-    $stopEnded = $false
-    $cleanupTimeoutMilliseconds = 750
-    try {
-        $invocation = $powerShell.BeginInvoke()
-        if (-not $invocation.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
-            $stopInvocation = $powerShell.BeginStop($null, $null)
-            if (-not $stopInvocation.AsyncWaitHandle.WaitOne($cleanupTimeoutMilliseconds)) {
-                throw [System.TimeoutException]::new('Inspection cleanup timed out.')
-            }
-            $powerShell.EndStop($stopInvocation)
-            $stopEnded = $true
-            try {
-                [void]$powerShell.EndInvoke($invocation)
-            }
-            catch [System.Management.Automation.PipelineStoppedException] {
-            }
-            $invocationEnded = $true
-            throw [System.TimeoutException]::new('Inspection command timed out.')
-        }
-
-        $output = @($powerShell.EndInvoke($invocation))
-        $invocationEnded = $true
-        if ($powerShell.HadErrors -or $powerShell.Streams.Error.Count -ne 0) {
-            throw [System.InvalidOperationException]::new('Inspection command failed.')
-        }
-        $output
-    }
-    finally {
-        if ($null -ne $stopInvocation -and -not $stopEnded -and $stopInvocation.IsCompleted) {
-            try {
-                $powerShell.EndStop($stopInvocation)
-            }
-            catch {
-            }
-        }
-        if ($null -ne $invocation -and -not $invocationEnded -and $invocation.IsCompleted) {
-            try {
-                [void]$powerShell.EndInvoke($invocation)
-            }
-            catch {
-            }
-        }
-        if ($null -ne $stopInvocation) {
-            $stopInvocation.AsyncWaitHandle.Close()
-        }
-        if ($null -ne $invocation) {
-            $invocation.AsyncWaitHandle.Close()
-        }
-        $powerShell.Dispose()
-    }
+    Invoke-GuardedInspectionResource -Operations $resourceOperations
 }
 
 function Get-BoundedProcessSnapshot {
