@@ -75,46 +75,102 @@ function Select-ProcessTreeConnections {
     }
 }
 
-function Invoke-BoundedCommand {
+function Invoke-BoundedInspection {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [scriptblock]$Command,
+        [ValidateSet('ProcessSnapshot', 'TcpSnapshot')]
+        [string]$InspectionKind,
 
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, [int]::MaxValue)]
-        [int]$TimeoutMilliseconds
+        [int]$TimeoutMilliseconds,
+
+        [scriptblock]$PipelineFactory
     )
 
-    $powerShell = [System.Management.Automation.PowerShell]::Create()
-    $disposePowerShell = $true
-    $asynchronous = $null
+    if ($null -ne $PipelineFactory) {
+        $powerShell = & $PipelineFactory
+    }
+    else {
+        $powerShell = [System.Management.Automation.PowerShell]::Create()
+        $errorAction = [System.Management.Automation.ActionPreference]::Stop
+        switch ($InspectionKind) {
+            'ProcessSnapshot' {
+                $operationTimeoutSeconds = [int][Math]::Max(
+                    1,
+                    [Math]::Ceiling($TimeoutMilliseconds / 1000.0)
+                )
+                [void]$powerShell
+                    .AddCommand('Get-CimInstance')
+                    .AddParameter('ClassName', 'Win32_Process')
+                    .AddParameter('Property', @('ProcessId', 'ParentProcessId', 'CreationDate'))
+                    .AddParameter('OperationTimeoutSec', $operationTimeoutSeconds)
+                    .AddParameter('ErrorAction', $errorAction)
+            }
+            'TcpSnapshot' {
+                [void]$powerShell
+                    .AddCommand('Get-NetTCPConnection')
+                    .AddParameter('ErrorAction', $errorAction)
+            }
+        }
+    }
+    if ($powerShell -isnot [System.Management.Automation.PowerShell]) {
+        throw [System.InvalidOperationException]::new('The inspection pipeline is unavailable.')
+    }
+
+    $invocation = $null
+    $stopInvocation = $null
+    $invocationEnded = $false
+    $stopEnded = $false
+    $cleanupTimeoutMilliseconds = 750
     try {
-        [void]$powerShell.AddScript($Command.ToString())
-        $asynchronous = $powerShell.BeginInvoke()
-        if (-not $asynchronous.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+        $invocation = $powerShell.BeginInvoke()
+        if (-not $invocation.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+            $stopInvocation = $powerShell.BeginStop($null, $null)
+            if (-not $stopInvocation.AsyncWaitHandle.WaitOne($cleanupTimeoutMilliseconds)) {
+                throw [System.TimeoutException]::new('Inspection cleanup timed out.')
+            }
+            $powerShell.EndStop($stopInvocation)
+            $stopEnded = $true
             try {
-                [void]$powerShell.BeginStop($null, $null)
+                [void]$powerShell.EndInvoke($invocation)
             }
-            catch {
+            catch [System.Management.Automation.PipelineStoppedException] {
             }
-            $disposePowerShell = $false
+            $invocationEnded = $true
             throw [System.TimeoutException]::new('Inspection command timed out.')
         }
 
-        $output = @($powerShell.EndInvoke($asynchronous))
+        $output = @($powerShell.EndInvoke($invocation))
+        $invocationEnded = $true
         if ($powerShell.HadErrors -or $powerShell.Streams.Error.Count -ne 0) {
             throw [System.InvalidOperationException]::new('Inspection command failed.')
         }
         $output
     }
     finally {
-        if ($null -ne $asynchronous -and $disposePowerShell) {
-            $asynchronous.AsyncWaitHandle.Close()
+        if ($null -ne $stopInvocation -and -not $stopEnded -and $stopInvocation.IsCompleted) {
+            try {
+                $powerShell.EndStop($stopInvocation)
+            }
+            catch {
+            }
         }
-        if ($disposePowerShell) {
-            $powerShell.Dispose()
+        if ($null -ne $invocation -and -not $invocationEnded -and $invocation.IsCompleted) {
+            try {
+                [void]$powerShell.EndInvoke($invocation)
+            }
+            catch {
+            }
         }
+        if ($null -ne $stopInvocation) {
+            $stopInvocation.AsyncWaitHandle.Close()
+        }
+        if ($null -ne $invocation) {
+            $invocation.AsyncWaitHandle.Close()
+        }
+        $powerShell.Dispose()
     }
 }
 
@@ -122,12 +178,9 @@ function Get-BoundedProcessSnapshot {
     param([int]$TimeoutMilliseconds)
 
     @(
-        Invoke-BoundedCommand -TimeoutMilliseconds $TimeoutMilliseconds -Command {
-            Get-CimInstance `
-                -ClassName Win32_Process `
-                -Property ProcessId, ParentProcessId, CreationDate `
-                -ErrorAction Stop
-        }
+        Invoke-BoundedInspection `
+            -InspectionKind ProcessSnapshot `
+            -TimeoutMilliseconds $TimeoutMilliseconds
     )
 }
 
@@ -138,9 +191,9 @@ function Get-BoundedTcpSnapshot {
     )
 
     $connections = @(
-        Invoke-BoundedCommand -TimeoutMilliseconds $TimeoutMilliseconds -Command {
-            Get-NetTCPConnection -ErrorAction Stop
-        }
+        Invoke-BoundedInspection `
+            -InspectionKind TcpSnapshot `
+            -TimeoutMilliseconds $TimeoutMilliseconds
     )
     @(Select-ProcessTreeConnections -ProcessIds $ProcessIds -Connections $connections)
 }
@@ -177,7 +230,10 @@ function Update-TrackedProcessTree {
     $byProcessId = [System.Collections.Generic.Dictionary[int, object]]::new()
     foreach ($process in $Processes) {
         $processId = [int]$process.ProcessId
-        if ($processId -le 0 -or $byProcessId.ContainsKey($processId)) {
+        if ($processId -eq 0) {
+            continue
+        }
+        if ($processId -lt 0 -or $byProcessId.ContainsKey($processId)) {
             throw 'Process identity snapshot is ambiguous.'
         }
         $byProcessId.Add($processId, $process)
