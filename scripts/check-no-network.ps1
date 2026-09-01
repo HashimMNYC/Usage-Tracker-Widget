@@ -80,18 +80,21 @@ function Write-NetworkConnectionRows {
     param(
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
-        [object[]]$Connections
+        [object[]]$Connections,
+
+        [Parameter()]
+        [System.IO.TextWriter]$Writer = [Console]::Out
     )
 
     foreach ($connection in $Connections) {
-        [Console]::Out.WriteLine(
+        $Writer.WriteLine(
             ("{0}`t{1}`t{2}" -f `
                 [int]$connection.PID, `
                 [string]$connection.State, `
                 [string]$connection.RemoteAddress)
         )
     }
-    [Console]::Out.Flush()
+    $Writer.Flush()
 }
 
 function New-InspectionAggregateException {
@@ -633,6 +636,32 @@ function New-NetworkSampleResult {
     }
 }
 
+function Write-NetworkSampleResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Result,
+
+        [Parameter()]
+        [System.IO.TextWriter]$Writer = [Console]::Out
+    )
+
+    if (-not $Result.Complete) {
+        return 2
+    }
+    $connections = @($Result.Connections)
+    if ($connections.Count -eq 0) {
+        return 0
+    }
+    try {
+        Write-NetworkConnectionRows -Connections $connections -Writer $Writer
+    }
+    catch {
+        return 2
+    }
+    1
+}
+
 function Get-InspectionTimeoutMilliseconds {
     param(
         [TimeSpan]$Now,
@@ -791,12 +820,5 @@ function Invoke-NetworkSample {
 
 if ($MyInvocation.InvocationName -ne '.') {
     $result = Invoke-NetworkSample -RootPid $RootPid -Duration ([TimeSpan]::FromSeconds(30))
-    if (-not $result.Complete) {
-        exit 2
-    }
-    if ($result.Connections.Count -eq 0) {
-        exit 0
-    }
-    Write-NetworkConnectionRows -Connections @($result.Connections)
-    exit 1
+    exit (Write-NetworkSampleResult -Result $result)
 }
