@@ -87,6 +87,98 @@ function New-InspectionAggregateException {
     [System.AggregateException]::new($Message, [System.Exception[]]$Failures.ToArray())
 }
 
+function Invoke-InspectionResourceCleanup {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Resource,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Operations
+    )
+
+    $failures = [System.Collections.Generic.List[System.Exception]]::new()
+    foreach ($requiredOperation in @(
+        'DisposePowerShell',
+        'GetRunspaceState',
+        'CloseRunspace',
+        'DisposeRunspace'
+    )) {
+        if ($Operations[$requiredOperation] -isnot [scriptblock]) {
+            $failures.Add(
+                [System.InvalidOperationException]::new('Inspection cleanup operations are incomplete.')
+            )
+        }
+    }
+    if ($failures.Count -ne 0) {
+        throw (New-InspectionAggregateException `
+                -Message 'Inspection cleanup configuration failed.' `
+                -Failures $failures)
+    }
+
+    if ($null -ne $Resource.PowerShell) {
+        try {
+            [void](& $Operations['DisposePowerShell'] $Resource.PowerShell)
+        }
+        catch {
+            $failures.Add($_.Exception)
+        }
+    }
+
+    if ($null -ne $Resource.Runspace) {
+        $runspaceIsClosed = $false
+        try {
+            $runspaceState = & $Operations['GetRunspaceState'] $Resource.Runspace
+            $runspaceIsClosed = [string]$runspaceState -eq 'Closed'
+        }
+        catch {
+            $failures.Add($_.Exception)
+        }
+
+        if (-not $runspaceIsClosed) {
+            try {
+                [void](& $Operations['CloseRunspace'] $Resource.Runspace)
+            }
+            catch {
+                $failures.Add($_.Exception)
+            }
+        }
+        try {
+            [void](& $Operations['DisposeRunspace'] $Resource.Runspace)
+        }
+        catch {
+            $failures.Add($_.Exception)
+        }
+    }
+
+    if ($failures.Count -ne 0) {
+        throw (New-InspectionAggregateException `
+                -Message 'One or more inspection cleanup actions failed.' `
+                -Failures $failures)
+    }
+}
+
+function New-PowerShellResourceCleanupOperations {
+    @{
+        DisposePowerShell = {
+            param([System.Management.Automation.PowerShell]$PowerShell)
+            $PowerShell.Dispose()
+        }
+        GetRunspaceState = {
+            param([System.Management.Automation.Runspaces.Runspace]$Runspace)
+            $Runspace.RunspaceStateInfo.State
+        }
+        CloseRunspace = {
+            param([System.Management.Automation.Runspaces.Runspace]$Runspace)
+            $Runspace.Close()
+        }
+        DisposeRunspace = {
+            param([System.Management.Automation.Runspaces.Runspace]$Runspace)
+            $Runspace.Dispose()
+        }
+    }
+}
+
 function Invoke-GuardedInspectionResource {
     [CmdletBinding()]
     param(
@@ -348,41 +440,69 @@ function Invoke-BoundedInspection {
     )
 
     $resourceOperations = @{
-        Create = { [System.Management.Automation.PowerShell]::Create() }
+        Create = {
+            [pscustomobject][ordered]@{
+                InspectionKind      = $InspectionKind
+                TimeoutMilliseconds = $TimeoutMilliseconds
+                Runspace            = $null
+                PowerShell          = $null
+            }
+        }.GetNewClosure()
         Configure = {
-            param($PowerShell)
-            if ($PowerShell -isnot [System.Management.Automation.PowerShell]) {
+            param($Resource)
+            $Resource.Runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+            if ($Resource.Runspace -isnot [System.Management.Automation.Runspaces.Runspace]) {
+                throw [System.InvalidOperationException]::new('The inspection runspace is unavailable.')
+            }
+            $Resource.Runspace.Open()
+
+            $Resource.PowerShell = [System.Management.Automation.PowerShell]::Create()
+            if ($Resource.PowerShell -isnot [System.Management.Automation.PowerShell]) {
                 throw [System.InvalidOperationException]::new('The inspection pipeline is unavailable.')
             }
+            $Resource.PowerShell.Runspace = $Resource.Runspace
+            $pipeline = $Resource.PowerShell
+
             $errorAction = [System.Management.Automation.ActionPreference]::Stop
-            switch ($InspectionKind) {
+            switch ($Resource.InspectionKind) {
                 'ProcessSnapshot' {
                     $operationTimeoutSeconds = [int][Math]::Max(
                         1,
-                        [Math]::Ceiling($TimeoutMilliseconds / 1000.0)
+                        [Math]::Ceiling($Resource.TimeoutMilliseconds / 1000.0)
                     )
-                    [void]$PowerShell
-                        .AddCommand('Get-CimInstance')
-                        .AddParameter('ClassName', 'Win32_Process')
-                        .AddParameter('Property', @('ProcessId', 'ParentProcessId', 'CreationDate'))
-                        .AddParameter('OperationTimeoutSec', $operationTimeoutSeconds)
-                        .AddParameter('ErrorAction', $errorAction)
+                    [void]$pipeline.AddCommand('Get-CimInstance')
+                    [void]$pipeline.AddParameter('ClassName', 'Win32_Process')
+                    [void]$pipeline.AddParameter(
+                        'Property',
+                        @('ProcessId', 'ParentProcessId', 'CreationDate')
+                    )
+                    [void]$pipeline.AddParameter('OperationTimeoutSec', $operationTimeoutSeconds)
+                    [void]$pipeline.AddParameter('ErrorAction', $errorAction)
                 }
                 'TcpSnapshot' {
-                    [void]$PowerShell
-                        .AddCommand('Get-NetTCPConnection')
-                        .AddParameter('ErrorAction', $errorAction)
+                    [void]$pipeline.AddCommand('Get-NetTCPConnection')
+                    [void]$pipeline.AddParameter('ErrorAction', $errorAction)
                 }
             }
-        }.GetNewClosure()
+        }
         Use = {
-            param($PowerShell)
-            $lifecycleOperations = New-PowerShellLifecycleOperations -PowerShell $PowerShell
+            param($Resource)
+            if ($Resource.PowerShell -isnot [System.Management.Automation.PowerShell] -or
+                $Resource.Runspace -isnot [System.Management.Automation.Runspaces.Runspace]) {
+                throw [System.InvalidOperationException]::new('The configured inspection resource is unavailable.')
+            }
+            $lifecycleOperations = New-PowerShellLifecycleOperations -PowerShell $Resource.PowerShell
             Invoke-InspectionLifecycle `
                 -Operations $lifecycleOperations `
-                -TimeoutMilliseconds $TimeoutMilliseconds
-        }.GetNewClosure()
-        Dispose = { param($PowerShell) $PowerShell.Dispose() }
+                -TimeoutMilliseconds $Resource.TimeoutMilliseconds
+        }
+        Dispose = {
+            param($Resource)
+            $cleanupOperations = New-PowerShellResourceCleanupOperations
+            Invoke-InspectionResourceCleanup `
+                -Resource $Resource `
+                -Operations $cleanupOperations
+        }
     }
     Invoke-GuardedInspectionResource -Operations $resourceOperations
 }
