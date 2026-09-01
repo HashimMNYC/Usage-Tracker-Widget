@@ -30,6 +30,15 @@ body {
   border: 1px solid var(--border);
 }
 
+body[data-tauri-drag-region="deep"] {
+  cursor: grab;
+  user-select: none;
+}
+
+body[data-tauri-drag-region="deep"]:active {
+  cursor: grabbing;
+}
+
 .title-row {
   display: flex;
   align-items: stretch;
@@ -43,9 +52,6 @@ body {
   padding: 9px 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  user-select: none;
-  app-region: drag;
-  -webkit-app-region: drag;
 }
 
 button {
@@ -57,8 +63,6 @@ button {
   color: var(--text);
   font: inherit;
   cursor: pointer;
-  app-region: no-drag;
-  -webkit-app-region: no-drag;
 }
 
 button:hover {

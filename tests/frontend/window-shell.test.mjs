@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 
-test("the main window capability permits the declared drag region", async () => {
+test("the whole widget is a native drag surface except for the close button", async () => {
   const capability = JSON.parse(await readFile(
     new URL("../../src-tauri/capabilities/default.json", import.meta.url),
     "utf8"
@@ -14,9 +14,14 @@ test("the main window capability permits the declared drag region", async () => 
     "core:default",
     "core:window:allow-start-dragging"
   ]);
-  assert.match(html, /<header[^>]+data-tauri-drag-region/);
-  assert.match(html, /class="drag-region"[^>]+data-tauri-drag-region/);
-  assert.match(html, /<button id="hide-widget"[^>]+aria-label="Hide usage widget"/);
-  assert.match(styles, /\.drag-region\s*\{[\s\S]*?app-region:\s*drag;/);
-  assert.match(styles, /button\s*\{[\s\S]*?app-region:\s*no-drag;/);
+  assert.match(html, /<body[^>]+data-tauri-drag-region="deep"/);
+  assert.match(
+    html,
+    /<button id="hide-widget"[^>]+data-tauri-drag-region="false"[^>]+aria-label="Hide usage widget"/
+  );
+  assert.doesNotMatch(html, /<header[^>]+data-tauri-drag-region/);
+  assert.doesNotMatch(html, /class="drag-region"[^>]+data-tauri-drag-region/);
+  assert.match(styles, /body\[data-tauri-drag-region="deep"\]\s*\{[\s\S]*?cursor:\s*grab;/);
+  assert.match(styles, /body\[data-tauri-drag-region="deep"\]:active\s*\{[\s\S]*?cursor:\s*grabbing;/);
+  assert.doesNotMatch(styles, /(?:-webkit-)?app-region\s*:/);
 });

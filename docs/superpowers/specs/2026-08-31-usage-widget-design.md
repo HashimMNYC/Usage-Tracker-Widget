@@ -123,7 +123,7 @@ Writes use a temporary sibling and atomic replacement. Corrupt state is quaranti
 - The GUI path is single-instance. Starting it again focuses and shows the existing window.
 - First launch opens the widget. Later launches restore the last valid position, clamped to a currently connected monitor.
 - The window is frameless, non-resizable, fixed-width, and automatically sized vertically for zero, one, or two visible providers.
-- The title row is the drag region. `[x]` hides the window without ending collection.
+- The whole widget surface is the drag region except `[x]`, which hides the window without ending collection.
 - Always on Top defaults to enabled and is persisted when toggled from the tray.
 - The tray menu contains Show/Hide, Refresh, Always on Top, Launch at Sign-in, Enable/Disable/Repair Claude Tracking as applicable, and Quit.
 - Quit disposes the tray icon and filesystem watchers before terminating.

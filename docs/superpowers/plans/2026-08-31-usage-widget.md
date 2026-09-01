@@ -888,11 +888,11 @@ export const layoutForProviderCount = (count) => count === 0 ? "empty" : count =
 
 - [ ] **Step 4: Build the static accessible DOM and styling**
 
-`index.html` contains an external stylesheet and module script, a title row with a dedicated `data-tauri-drag-region` element, a real `[x]` button with `aria-label="Hide usage widget"`, and `<main id="providers" aria-live="polite"></main>`. Do not use inline scripts/styles or remote assets.
+`index.html` contains an external stylesheet and module script, a body-level `data-tauri-drag-region="deep"` surface, a real `[x]` button opted out with `data-tauri-drag-region="false"` and `aria-label="Hide usage widget"`, and `<main id="providers" aria-live="polite"></main>`. Do not use inline scripts/styles or remote assets.
 
 `render.js` must create provider cards with `document.createElement`, `textContent`, `replaceChildren`, and fixed labels only. Give meters `role="progressbar"`, `aria-valuemin="0"`, `aria-valuemax="100"`, and the exact remaining value. Never use `innerHTML`.
 
-`styles.css` uses the approved near-black palette, Cascadia Mono/Consolas/system monospace stack, green Codex and orange Claude variables, amber/red threshold classes, `font-variant-numeric: tabular-nums`, visible `:focus-visible`, no transitions/animations, and a `prefers-contrast: more` override.
+`styles.css` uses the approved near-black palette, Cascadia Mono/Consolas/system monospace stack, green Codex and orange Claude variables, amber/red threshold classes, `font-variant-numeric: tabular-nums`, native-surface `grab`/`grabbing` cursor feedback, visible `:focus-visible`, no transitions/animations, and a `prefers-contrast: more` override.
 
 - [ ] **Step 5: Implement the global-Tauri bridge and app lifecycle**
 
@@ -901,12 +901,11 @@ Because the frontend is static and unbundled, `bridge.js` must use the injected 
 ```js
 const invoke = (command, args = {}) => window.__TAURI__.core.invoke(command, args);
 export const getWidgetView = () => invoke("get_widget_view");
-export const refresh = () => invoke("refresh");
 export const hideWidget = () => invoke("hide_widget");
-export const setWidgetLayout = (layout) => invoke("set_widget_layout", {layout});
+export const setWidgetHeight = (height) => invoke("set_widget_height", {height});
 ```
 
-`app.js` loads and renders once, requests a refreshed view every five seconds, updates countdown text every second without file access, and calls `setWidgetLayout` only when the visible-provider count changes. `[x]` and Escape call `hideWidget`; stop pointer propagation on `[x]` so it is not a drag gesture. When no provider is visible, render exactly `NO CURRENT LIMIT DATA`.
+`app.js` loads and renders once, polls the cached `get_widget_view` projection every five seconds without forcing a rescan, updates countdown text every second without file access, and synchronizes the measured body height only when needed. Native filesystem watching, the 60-second fallback, and the tray Refresh action remain responsible for source rescans. `[x]` and Escape call `hideWidget`; stop pointer propagation on `[x]` so it is not a drag gesture. When no provider is visible, render exactly `NO CURRENT LIMIT DATA`.
 
 - [ ] **Step 6: Run frontend tests**
 
@@ -1021,10 +1020,6 @@ pub enum IntegrationStatus { Disabled, Enabled, NeedsRepair, Conflict }
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct CommandError { pub code: &'static str, pub message: &'static str }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Layout { Empty, Single, Dual }
-
 #[tauri::command]
 pub fn get_widget_view(state: tauri::State<'_, ShellState>) -> Result<WidgetView, CommandError>;
 #[tauri::command]
@@ -1032,12 +1027,12 @@ pub async fn refresh(state: tauri::State<'_, ShellState>) -> Result<WidgetView, 
 #[tauri::command]
 pub fn hide_widget(app: tauri::AppHandle) -> Result<(), CommandError>;
 #[tauri::command]
-pub fn set_widget_layout(app: tauri::AppHandle, layout: Layout) -> Result<(), CommandError>;
+pub fn set_widget_height(app: tauri::AppHandle, height: u32) -> Result<(), CommandError>;
 ```
 
 Define `ShellState` with `Arc<CollectionCoordinator>`, `Arc<dyn StateStore>`, `ClaudeSettingsManager`, `Arc<dyn StartupRegistration>`, and a mutex-owned optional `CollectorSupervisor`. No field contains raw provider data outside normalized persisted state.
 
-`get_widget_view` filters expiry using the current epoch. `refresh` clones the coordinator `Arc`, performs the full rescan inside `tauri::async_runtime::spawn_blocking`, and returns the same projection so disk scanning never blocks WebView event handling. Command errors contain a fixed snake-case code and fixed user-safe message only. `set_widget_layout` maps only `Empty`, `Single`, and `Dual` to heights 102, 178, and 254 at fixed width 356.
+`get_widget_view` filters expiry using the current epoch. `refresh` clones the coordinator `Arc`, performs the full rescan inside `tauri::async_runtime::spawn_blocking`, and returns the same projection so disk scanning never blocks WebView event handling. Command errors contain a fixed snake-case code and fixed user-safe message only. `set_widget_height` clamps the measured content height to the native safety range while keeping the width fixed at 356.
 
 - [ ] **Step 5: Implement native window and tray lifecycle**
 

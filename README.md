@@ -6,12 +6,12 @@ Usage Widget is a portable Windows 11 x64 desktop app for exact, locally observe
 
 Keep `usage-widget.exe` wherever you want to run it, then double-click it. There is no installer. Windows 11's Evergreen WebView2 Runtime is required.
 
-The first GUI process opens the widget. Starting the EXE again shows and focuses the existing widget instead of keeping a second GUI instance. The title row is draggable. `[x]` and Escape hide the window; they do not exit the process.
+The first GUI process opens the widget. Starting the EXE again shows and focuses the existing widget instead of keeping a second GUI instance. The whole widget surface is draggable except `[x]`. `[x]` and Escape hide the window; they do not exit the process.
 
 The notification-area menu is the settings surface:
 
 - **Show/Hide** toggles the window. A left-click on the tray icon also shows it.
-- **Refresh** immediately rescans the local Codex sources. The app also watches for changes and refreshes in the background.
+- **Refresh** immediately rescans the local Codex sources. The app watches for changes in the background, while the visible widget reads the cached result without repeatedly rescanning history.
 - **Always on Top** toggles and saves the topmost preference. It is enabled by default.
 - **Launch at Sign-in** opts into a per-user Windows startup entry. When the EXE has moved, this becomes **Repair Launch at Sign-in**.
 - **Enable Claude Tracking** adds the widget's status-line command only when Claude's settings file is valid and has no existing status line. It becomes **Disable Claude Tracking** after setup or **Repair Claude Tracking** when the installed EXE path no longer matches. A conflict is left unchanged for manual review.

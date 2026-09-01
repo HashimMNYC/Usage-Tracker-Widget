@@ -1,4 +1,4 @@
-import { getWidgetView, hideWidget, refresh, setWidgetHeight } from "./bridge.js";
+import { getWidgetView, hideWidget, setWidgetHeight } from "./bridge.js";
 import { renderProviders, updateCountdowns } from "./render.js";
 import {
   createHeightSynchronizer, createLatestOnlyRefresh, measuredWidgetHeight, visibleProviders
@@ -57,7 +57,7 @@ async function loadInitialView() {
   }
 }
 
-const refreshGate = createLatestOnlyRefresh(refresh, applyView);
+const viewGate = createLatestOnlyRefresh(getWidgetView, applyView);
 
 function hide() {
   void hideWidget().catch(() => {});
@@ -77,5 +77,5 @@ if ("ResizeObserver" in window) {
 window.addEventListener("resize", scheduleHeightSync);
 
 void loadInitialView();
-setInterval(() => void refreshGate.run().catch(() => {}), 5_000);
+setInterval(() => void viewGate.run().catch(() => {}), 5_000);
 setInterval(() => renderCurrentView(), 1_000);
