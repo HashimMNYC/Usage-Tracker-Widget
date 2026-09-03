@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="566" viewBox="0 0 760 566" role="img" aria-labelledby="title description">
+  <title id="title">Usage Widget preview</title>
+  <desc id="description">A synthetic preview of the Usage Widget showing Codex and Claude five-hour and seven-day limits.</desc>
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.42"/>
+    </filter>
+  </defs>
+
+  <rect width="760" height="566" fill="#0b0f0c"/>
+  <g filter="url(#shadow)" shape-rendering="crispEdges">
+    <rect x="24" y="24" width="712" height="518" fill="#101411" stroke="#7e8a80" stroke-width="2"/>
+    <rect x="26" y="26" width="708" height="70" fill="#161d18"/>
+    <line x1="25" y1="96" x2="735" y2="96" stroke="#7e8a80" stroke-width="2"/>
+    <line x1="650" y1="25" x2="650" y2="96" stroke="#7e8a80" stroke-width="2"/>
+
+    <g font-family="Cascadia Mono, Consolas, monospace" fill="#edf3e9">
+      <text x="50" y="70" font-size="28" font-weight="700" letter-spacing="3">USAGE</text>
+      <text x="678" y="70" font-size="26">[x]</text>
+
+      <rect x="44" y="116" width="672" height="194" fill="none" stroke="#7e8a80" stroke-width="2"/>
+      <text x="64" y="150" font-size="24" font-weight="700" letter-spacing="2" fill="#69d383">CODEX</text>
+      <text x="64" y="188" font-size="22">5H</text>
+      <text x="128" y="188" font-size="22" fill="#69d383">[██████░░░░]</text>
+      <text x="474" y="188" font-size="22">62% LEFT</text>
+      <text x="128" y="218" font-size="20" fill="#aab4a8">RESET 03H 42M</text>
+      <text x="64" y="258" font-size="22">7D</text>
+      <text x="128" y="258" font-size="22" fill="#69d383">[████████░░]</text>
+      <text x="474" y="258" font-size="22">81% LEFT</text>
+      <text x="128" y="288" font-size="20" fill="#aab4a8">RESET 04D 06H</text>
+
+      <rect x="44" y="330" width="672" height="194" fill="none" stroke="#7e8a80" stroke-width="2"/>
+      <text x="64" y="364" font-size="24" font-weight="700" letter-spacing="2" fill="#f19b58">CLAUDE</text>
+      <text x="64" y="402" font-size="22">5H</text>
+      <text x="128" y="402" font-size="22" fill="#f19b58">[████░░░░░░]</text>
+      <text x="474" y="402" font-size="22">44% LEFT</text>
+      <text x="128" y="432" font-size="20" fill="#aab4a8">RESET 01H 17M</text>
+      <text x="64" y="470" font-size="22">7D</text>
+      <text x="128" y="470" font-size="22" fill="#f19b58">[███████░░░]</text>
+      <text x="474" y="470" font-size="22">73% LEFT</text>
+      <text x="128" y="500" font-size="20" fill="#aab4a8">RESET 02D 11H</text>
+    </g>
+  </g>
+</svg>
