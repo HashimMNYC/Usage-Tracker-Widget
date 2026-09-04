@@ -117,6 +117,59 @@ fn accepts_general_weekly_only_limit_without_fabricating_a_short_window() {
 }
 
 #[test]
+fn codex_0153_astra6_rollout_refreshes_general_limits_and_discards_extra_metadata() {
+    // Synthetic values with the record shape observed in Codex 0.153.0 Astra 6 sessions.
+    let temp = TempDir::new().unwrap();
+    let sessions = temp.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    let path = sessions.join("rollout.jsonl");
+    let metadata = json!({"type": "session_meta", "payload": {"cli_version": "0.153.0"}});
+    let context = json!({"type": "turn_context", "payload": {"model": "gpt-6-astra"}});
+    let mut record = general_weekly_record(NOW - 20, 40.0);
+    record["type"] = json!("event_msg");
+    record["payload"]["info"] = json!({"total_token_usage": {"total_tokens": 12345}});
+    let limits = record["payload"]["rate_limits"].as_object_mut().unwrap();
+    for (key, value) in [
+        ("limit_name", Value::Null),
+        (
+            "credits",
+            json!({"has_credits": false, "unlimited": false, "balance": null}),
+        ),
+        ("individual_limit", Value::Null),
+        ("spend_control_reached", json!(false)),
+        ("plan_type", json!("pro")),
+        ("rate_limit_reached_type", Value::Null),
+    ] {
+        limits.insert(key.to_owned(), value);
+    }
+    write_jsonl(&path, &[metadata.clone(), context.clone(), record.clone()]);
+    let collector = CodexCollector::new(vec![sessions]);
+    let initial = collector.initial_scan(NOW).snapshot.unwrap();
+    assert_eq!(initial.weekly_window.unwrap().used_percent, 40.0);
+
+    record["timestamp"] = json!(NOW - 5);
+    record["payload"]["rate_limits"]["primary"]["used_percent"] = json!(42.0);
+    write_jsonl(&path, &[metadata, context, record]);
+    let changed = collector.refresh_changed(&BTreeSet::from([path]), NOW);
+    let full = collector.full_rescan(NOW);
+    assert!(changed.diagnostic.is_none());
+    assert!(full.diagnostic.is_none());
+    assert_eq!(changed.snapshot, full.snapshot);
+    assert_eq!(
+        serde_json::to_value(full.snapshot.unwrap()).unwrap(),
+        json!({
+            "provider": "codex",
+            "observed_at": NOW - 5,
+            "weekly_window": {
+                "duration_minutes": 10_080,
+                "used_percent": 42.0,
+                "resets_at": NOW + 86_400
+            }
+        })
+    );
+}
+
+#[test]
 fn rejects_legacy_weekly_only_limit_without_the_general_limit_id() {
     let mut legacy_partial = general_weekly_record(NOW - 5, 35.0);
     legacy_partial["payload"]["rate_limits"]

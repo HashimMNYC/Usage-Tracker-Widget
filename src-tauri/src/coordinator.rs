@@ -180,6 +180,9 @@ impl<C: CollectorBackend> CoordinatorCore<C> {
         let Some(snapshot) = result.snapshot else {
             if let Some(code) = diagnostic {
                 self.diagnostics.record(code);
+                if code == DiagnosticCode::SourceUnreadable {
+                    return Err(CoordinatorError::Collect);
+                }
             }
             return Ok(());
         };
@@ -700,8 +703,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_collection_records_the_collectors_fixed_diagnostic() {
+    fn unreadable_collection_reports_failure_without_replacing_current_state() {
         const NOW: i64 = 2_000_000_000;
+        let current = valid_snapshot(NOW - 20, NOW + 100);
+        let mut initial = PersistedState::default();
+        initial.snapshots.insert(ProviderId::Codex, current.clone());
+        let store = Arc::new(FakeStore {
+            state: Mutex::new(initial),
+        });
         let coordinator = CoordinatorCore::load(
             Arc::new(FakeCollector {
                 result: Mutex::new(CollectResult {
@@ -709,16 +718,42 @@ mod tests {
                     diagnostic: Some(DiagnosticCode::SourceUnreadable),
                 }),
             }),
-            Arc::new(FakeStore::default()),
+            store.clone(),
             NOW,
         )
         .unwrap();
 
-        coordinator.refresh_now(NOW).unwrap();
-
+        assert_eq!(coordinator.refresh_now(NOW), Err(CoordinatorError::Collect));
+        assert_eq!(coordinator.current_snapshots(NOW), vec![current.clone()]);
+        assert_eq!(
+            store.state.lock().unwrap().snapshots[&ProviderId::Codex],
+            current
+        );
         assert!(coordinator
             .diagnostics()
             .contains(&DiagnosticCode::SourceUnreadable));
+    }
+
+    #[test]
+    fn empty_collection_records_the_collectors_fixed_diagnostic() {
+        const NOW: i64 = 2_000_000_000;
+        for diagnostic in [DiagnosticCode::NoFiles, DiagnosticCode::NoExactLimits] {
+            let coordinator = CoordinatorCore::load(
+                Arc::new(FakeCollector {
+                    result: Mutex::new(CollectResult {
+                        snapshot: None,
+                        diagnostic: Some(diagnostic),
+                    }),
+                }),
+                Arc::new(FakeStore::default()),
+                NOW,
+            )
+            .unwrap();
+
+            coordinator.refresh_now(NOW).unwrap();
+
+            assert!(coordinator.diagnostics().contains(&diagnostic));
+        }
     }
 
     #[test]

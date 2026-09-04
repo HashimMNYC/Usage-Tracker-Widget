@@ -1,3 +1,13 @@
+## v0.1.1 patch notes - September 4, 2026
+
+- Verified Astra 6 (`gpt-6-astra`) usage records from Codex 0.153.0, including accounts with only a weekly limit.
+- Tray **Refresh** now updates the panel immediately after scanning and reports **LOCAL DATA CHECKED** or **REFRESH FAILED**.
+- Each provider shows how long ago its usage was observed, so an unchanged percentage has visible context.
+
+**Update:** Quit the widget from its tray menu, download the
+[latest EXE](https://github.com/HashimMNYC/Usage-Tracker-Widget/releases/latest/download/usage-widget.exe),
+replace your existing EXE in the same location, and reopen it. Preferences are preserved.
+
 <div align="center">
   <img src="assets/icon.svg" alt="Usage Widget icon" width="80">
   <h1>Usage Widget</h1>
@@ -56,7 +66,7 @@ hide it without exiting.
 Use the tray menu to:
 
 - **Show/Hide** the panel (a left-click on the tray icon also shows it).
-- **Refresh** local Codex data immediately.
+- **Refresh** local Codex data immediately; the panel confirms completion or reports a failure.
 - Toggle **Always on Top**, enabled by default.
 - Opt into **Launch at Sign-in**.
 - Enable, disable, or repair **Claude Tracking**.
@@ -74,6 +84,17 @@ Only current records identified as the general `codex` limit are used. Named
 model-specific limits are not substituted for the general account limit. Legacy
 records without a limit identifier are accepted only when both exact windows are
 present. A missing, malformed, ambiguous, or expired window stays hidden.
+
+Astra 6 uses the general Codex subscription limit in the locally verified Codex
+0.153.0 records. The CODEX card shows that account limit, rather than a separate
+per-model allowance. Regression coverage includes this record shape and its added
+metadata fields.
+
+**Refresh checks local files.** It cannot request a newer quota from OpenAI.
+`LOCAL DATA CHECKED` confirms the scan; `OBSERVED ... AGO` shows the age of the
+provider's usage record. The percentage can stay unchanged until Codex writes a
+new value, and the display rounds remaining usage to a whole percent. Continue
+using Codex and refresh again when a new local observation is available.
 
 ### Claude Code
 

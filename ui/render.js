@@ -13,6 +13,16 @@ const createElement = (tagName, className, text) => {
 
 const resetText = (resetsAt, nowMs) => `RESET ${formatCountdown(resetsAt, nowMs)}`;
 
+function observationText(observedAt, nowMs) {
+  const seconds = Math.floor(nowMs / 1000 - observedAt);
+  if (!Number.isFinite(seconds) || seconds < 0) return "OBSERVATION TIME UNAVAILABLE";
+  const [value, unit] = seconds < 60 ? [seconds, "S"]
+    : seconds < 3600 ? [Math.floor(seconds / 60), "M"]
+    : seconds < 86400 ? [Math.floor(seconds / 3600), "H"]
+    : [Math.floor(seconds / 86400), "D"];
+  return `OBSERVED ${value}${unit} AGO`;
+}
+
 function createWindowRow(provider, label, window, nowMs) {
   const remaining = remainingPercent(window.used_percent);
   const row = createElement("section", "window-row");
@@ -41,6 +51,9 @@ function createProviderCard(provider, nowMs) {
   for (const [label, window] of providerWindowEntries(provider)) {
     card.append(createWindowRow(provider.provider, label, window, nowMs));
   }
+  const observation = createElement("p", "observation-age", observationText(provider.observed_at, nowMs));
+  observation.dataset.observedAt = String(provider.observed_at);
+  card.append(observation);
   return card;
 }
 
@@ -55,5 +68,8 @@ export function renderProviders(container, providers, nowMs) {
 export function updateCountdowns(container, nowMs) {
   for (const reset of container.querySelectorAll("[data-reset-at]")) {
     reset.textContent = resetText(Number(reset.dataset.resetAt), nowMs);
+  }
+  for (const observation of container.querySelectorAll("[data-observed-at]")) {
+    observation.textContent = observationText(Number(observation.dataset.observedAt), nowMs);
   }
 }

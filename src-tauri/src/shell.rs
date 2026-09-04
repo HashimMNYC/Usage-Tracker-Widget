@@ -8,7 +8,7 @@ use std::{
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Emitter, EventTarget, Manager, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt as _, MessageDialogKind};
@@ -866,8 +866,17 @@ fn refresh_in_background(app: &AppHandle) {
         return;
     };
     let coordinator = state.coordinator.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let _ = coordinator.refresh_now(unix_now());
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let succeeded =
+            tauri::async_runtime::spawn_blocking(move || coordinator.refresh_now(unix_now()))
+                .await
+                .is_ok_and(|result| result.is_ok());
+        let _ = app.emit_to(
+            EventTarget::webview_window(MAIN_WINDOW),
+            "usage-refresh-completed",
+            succeeded,
+        );
     });
 }
 

@@ -107,26 +107,41 @@ export function createHeightSynchronizer(setHeight, commit) {
 }
 
 export function createLatestOnlyRefresh(request, commit) {
-  let pending = false;
+  let pending = null;
   let refreshQueued = false;
 
-  const run = async () => {
+  const run = () => {
     if (pending) {
       refreshQueued = true;
-      return;
+      return pending;
     }
 
-    pending = true;
-    try {
-      const view = await request();
-      if (!refreshQueued) commit(view);
-    } finally {
-      pending = false;
-      if (refreshQueued) {
-        refreshQueued = false;
-        return run();
+    let resolveCompletion;
+    let rejectCompletion;
+    pending = new Promise((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    const completion = pending;
+    void (async () => {
+      try {
+        do {
+          refreshQueued = false;
+          try {
+            const view = await request();
+            if (!refreshQueued) commit(view);
+          } catch (error) {
+            if (!refreshQueued) throw error;
+          }
+        } while (refreshQueued);
+        resolveCompletion();
+      } catch (error) {
+        rejectCompletion(error);
+      } finally {
+        pending = null;
       }
-    }
+    })();
+    return completion;
   };
 
   return {run};

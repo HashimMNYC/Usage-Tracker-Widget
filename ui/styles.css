@@ -93,6 +93,26 @@ button:focus-visible {
   letter-spacing: 0.08em;
 }
 
+.observation-age,
+#refresh-status {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#refresh-status {
+  margin: 0;
+  padding: 0 10px 10px;
+}
+
+#refresh-status:empty {
+  display: none;
+}
+
+#refresh-status[data-failed="true"] {
+  color: var(--red);
+}
+
 .provider--codex .provider-heading,
 .meter--codex {
   color: var(--codex);
